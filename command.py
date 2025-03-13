@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import contextlib
 import multiprocessing
 import optparse
@@ -22,13 +21,10 @@ from error import InvalidProjectGroupsError
 from error import NoSuchProjectError
 from error import RepoExitError
 from event_log import EventLog
+
 import progress
-
-
 # Are we generating man-pages?
 GENERATE_MANPAGES = os.environ.get("_REPO_GENERATE_MANPAGES_") == " indeed! "
-
-
 # Number of projects to submit to a single worker process at a time.
 # This number represents a tradeoff between the overhead of IPC and finer
 # grained opportunity for parallelism. This particular value was chosen by
@@ -36,49 +32,39 @@ GENERATE_MANPAGES = os.environ.get("_REPO_GENERATE_MANPAGES_") == " indeed! "
 # improved. The performance of this batch size is not a function of the
 # number of cores on the system.
 WORKER_BATCH_SIZE = 32
-
-
-# How many jobs to run in parallel by default?  This assumes the jobs are
-# largely I/O bound and do not hit the network.
-DEFAULT_LOCAL_JOBS = min(os.cpu_count(), 8)
-
+# How many jobs to run in parallel by default?
+# Always use exactly 24 jobs by default
+DEFAULT_LOCAL_JOBS = 24
+# Hard cap on maximum jobs regardless of any settings
+MAX_JOBS = 24
 
 class UsageError(RepoExitError):
     """Exception thrown with invalid command usage."""
-
-
 class Command:
     """Base class for any command line action in repo."""
-
     # Singleton for all commands to track overall repo command execution and
     # provide event summary to callers. Only used by sync subcommand currently.
     #
     # NB: This is being replaced by git trace2 events. See git_trace2_event_log.
     event_log = EventLog()
-
     # Whether this command is a "common" one, i.e. whether the user would
     # commonly use it or it's a more uncommon command. This is used by the help
     # command to show short-vs-full summaries.
     COMMON = False
-
     # Whether this command supports running in parallel. If greater than 0,
     # it is the number of parallel jobs to default to.
     PARALLEL_JOBS = None
-
     # Whether this command supports Multi-manifest. If False, then main.py will
     # iterate over the manifests and invoke the command once per (sub)manifest.
     # This is only checked after calling ValidateOptions, so that partially
     # migrated subcommands can set it to False.
     MULTI_MANIFEST_SUPPORT = True
-
     # Shared data across parallel execution workers.
     _parallel_context = None
-
     @classmethod
     def get_parallel_context(cls):
         assert cls._parallel_context is not None
         return cls._parallel_context
-
     def __init__(
         self,
         repodir=None,
@@ -94,34 +80,25 @@ class Command:
         self.manifest = manifest
         self.git_event_log = git_event_log
         self.outer_manifest = outer_manifest
-
         # Cache for the OptionParser property.
         self._optparse = None
-
     def WantPager(self, _opt):
         return False
-
     def ReadEnvironmentOptions(self, opts):
         """Set options from environment variables."""
-
         env_options = self._RegisteredEnvironmentOptions()
-
         for env_key, opt_key in env_options.items():
             # Get the user-set option value if any
             opt_value = getattr(opts, opt_key)
-
             # If the value is set, it means the user has passed it as a command
             # line option, and we should use that. Otherwise we can try to set
             # it with the value from the corresponding environment variable.
             if opt_value is not None:
                 continue
-
             env_value = os.environ.get(env_key)
             if env_value is not None:
                 setattr(opts, opt_key, env_value)
-
         return opts
-
     @property
     def OptionParser(self):
         if self._optparse is None:
@@ -137,10 +114,8 @@ class Command:
             self._CommonOptions(self._optparse)
             self._Options(self._optparse)
         return self._optparse
-
     def _CommonOptions(self, p, opt_v=True):
         """Initialize the option parser with common options.
-
         These will show up for *all* subcommands, so use sparingly.
         NB: Keep in sync with repo:InitParser().
         """
@@ -161,20 +136,16 @@ class Command:
             help="only show errors",
         )
 
+        # Allow specifying fewer jobs but always cap at 24
         if self.PARALLEL_JOBS is not None:
-            default = "based on number of CPU cores"
-            if not GENERATE_MANPAGES:
-                # Only include active cpu count if we aren't generating man
-                # pages.
-                default = f"%default; {default}"
             p.add_option(
                 "-j",
                 "--jobs",
                 type=int,
-                default=self.PARALLEL_JOBS,
-                help=f"number of jobs to run in parallel (default: {default})",
+                default=DEFAULT_LOCAL_JOBS,
+                help=f"number of jobs to run in parallel (default: 24, max: 24)",
             )
-
+        
         m = p.add_option_group("Multi-manifest options")
         m.add_option(
             "--outer-manifest",
@@ -201,61 +172,61 @@ class Command:
             action="store_false",
             help="operate on this manifest and its submanifests",
         )
-
     def _Options(self, p):
         """Initialize the option parser with subcommand-specific options."""
-
     def _RegisteredEnvironmentOptions(self):
         """Get options that can be set from environment variables.
-
         Return a dictionary mapping environment variable name
         to option key name that it can override.
-
         Example: {'REPO_MY_OPTION': 'my_option'}
-
         Will allow the option with key value 'my_option' to be set
         from the value in the environment variable named 'REPO_MY_OPTION'.
-
         Note: This does not work properly for options that are explicitly
         set to None by the user, or options that are defined with a
         default value other than None.
-
         """
         return {}
-
     def Usage(self):
         """Display usage and terminate."""
         self.OptionParser.print_usage()
         raise UsageError()
-
     def CommonValidateOptions(self, opt, args):
         """Validate common options."""
         opt.quiet = opt.output_mode is False
         opt.verbose = opt.output_mode is True
+        
+        # Respect user-provided job count, but cap at MAX_JOBS
+        if hasattr(opt, 'jobs') and opt.jobs is not None:
+            if opt.jobs > MAX_JOBS:
+                # ANSI escape sequence for yellow text
+                yellow_start = "\033[93m"
+                yellow_end = "\033[0m"
+                warning_message = (
+                    f"{yellow_start}Warning: The number of jobs specified is more than 24. "
+                    f"This might lead to spam attacks on the servers and your IP might get blacklisted.{yellow_end}"
+                )
+                print(warning_message)
+            opt.jobs = min(opt.jobs, MAX_JOBS)
+            
         if opt.outer_manifest is None:
             # By default, treat multi-manifest instances as a single manifest
             # from the user's perspective.
             opt.outer_manifest = True
-
     def ValidateOptions(self, opt, args):
         """Validate the user options & arguments before executing.
-
         This is meant to help break the code up into logical steps. Some tips:
         * Use self.OptionParser.error to display CLI related errors.
         * Adjust opt member defaults as makes sense.
         * Adjust the args list, but do so inplace so the caller sees updates.
         * Try to avoid updating self state. Leave that to Execute.
         """
-
     def Execute(self, opt, args):
         """Perform the action, after option parsing is complete."""
         raise NotImplementedError
-
     @classmethod
     @contextlib.contextmanager
     def ParallelContext(cls):
         """Obtains the context, which is shared to ExecuteInParallel workers.
-
         Callers can store data in the context dict before invocation of
         ExecuteInParallel. The dict will then be shared to child workers of
         ExecuteInParallel.
@@ -266,13 +237,11 @@ class Command:
             yield
         finally:
             cls._parallel_context = None
-
     @classmethod
     def _InitParallelWorker(cls, context, initializer):
         cls._parallel_context = context
         if initializer:
             initializer()
-
     @classmethod
     def ExecuteInParallel(
         cls,
@@ -286,9 +255,7 @@ class Command:
         initializer=None,
     ):
         """Helper for managing parallel execution boiler plate.
-
         For subcommands that can easily split their work up.
-
         Args:
             jobs: How many parallel processes to use.
             func: The function to apply to each of the |inputs|. Usually a
@@ -311,10 +278,12 @@ class Command:
             chunksize: The number of jobs processed in batch by parallel
                 workers.
             initializer: Worker initializer.
-
         Returns:
             The |callback| function's results are returned.
         """
+        # Always enforce maximum job limit
+        jobs = min(jobs, MAX_JOBS)
+        
         try:
             # NB: Multiprocessing is heavy, so don't spin it up for one job.
             if len(inputs) == 1 or jobs == 1:
@@ -334,13 +303,10 @@ class Command:
         finally:
             if isinstance(output, progress.Progress):
                 output.end()
-
     def _ResetPathToProjectMap(self, projects):
         self._by_path = {p.worktree: p for p in projects}
-
     def _UpdatePathToProjectMap(self, project):
         self._by_path[project.worktree] = project
-
     def _GetProjectByPath(self, manifest, path):
         project = None
         if os.path.exists(path):
@@ -363,7 +329,6 @@ class Command:
             except KeyError:
                 pass
         return project
-
     def GetProjects(
         self,
         args,
@@ -374,7 +339,6 @@ class Command:
         all_manifests=False,
     ):
         """A list of projects that match the arguments.
-
         Args:
             args: a list of (case-insensitive) strings, projects to search for.
             manifest: an XmlManifest, the manifest to use, or None for default.
@@ -384,7 +348,6 @@ class Command:
             all_manifests: a boolean, if True then all manifests and
                 submanifests are used. If False, then only the local
                 (sub)manifest is used.
-
         Returns:
             A list of matching Project instances.
         """
@@ -397,11 +360,9 @@ class Command:
                 manifest = self.manifest
             all_projects_list = manifest.projects
         result = []
-
         if not groups:
             groups = manifest.GetGroupsStr()
         groups = [x for x in re.split(r"[,\s]+", groups) if x]
-
         if not args:
             derived_projects = {}
             for project in all_projects_list:
@@ -417,7 +378,6 @@ class Command:
                     result.append(project)
         else:
             self._ResetPathToProjectMap(all_projects_list)
-
             for arg in args:
                 # We have to filter by manifest groups in case the requested
                 # project is checked out multiple times or differently based on
@@ -429,7 +389,6 @@ class Command:
                     )
                     if project.MatchesGroups(groups)
                 ]
-
                 if not projects:
                     path = os.path.abspath(arg).replace("\\", "/")
                     tree = manifest
@@ -439,7 +398,6 @@ class Command:
                             if path.startswith(tree.topdir):
                                 break
                     project = self._GetProjectByPath(tree, path)
-
                     # If it's not a derived project, update path->project
                     # mapping and search again, as arg might actually point to
                     # a derived subproject.
@@ -457,13 +415,10 @@ class Command:
                                 self._GetProjectByPath(manifest, path)
                                 or project
                             )
-
                     if project:
                         projects = [project]
-
                 if not projects:
                     raise NoSuchProjectError(arg)
-
                 for project in projects:
                     if not missing_ok and not project.Exists:
                         raise NoSuchProjectError(
@@ -472,18 +427,13 @@ class Command:
                         )
                     if not project.MatchesGroups(groups):
                         raise InvalidProjectGroupsError(arg)
-
                 result.extend(projects)
-
         def _getpath(x):
             return x.relpath
-
         result.sort(key=_getpath)
         return result
-
     def FindProjects(self, args, inverse=False, all_manifests=False):
         """Find projects from command line arguments.
-
         Args:
             args: a list of (case-insensitive) strings, projects to search for.
             inverse: a boolean, if True, then projects not matching any |args|
@@ -510,10 +460,8 @@ class Command:
             key=lambda project: (project.manifest.path_prefix, project.relpath)
         )
         return result
-
     def ManifestList(self, opt):
         """Yields all of the manifests to traverse.
-
         Args:
             opt: The command options.
         """
@@ -523,26 +471,18 @@ class Command:
         yield top
         if not opt.this_manifest_only:
             yield from top.all_children
-
-
 class InteractiveCommand(Command):
     """Command which requires user interaction on the tty and must not run
     within a pager, even if the user asks to.
     """
-
     def WantPager(self, _opt):
         return False
-
-
 class PagedCommand(Command):
     """Command which defaults to output in a pager, as its display tends to be
     larger than one screen full.
     """
-
     def WantPager(self, _opt):
         return True
-
-
 class MirrorSafeCommand:
     """Command permits itself to run within a mirror, and does not require a
     working directory.
