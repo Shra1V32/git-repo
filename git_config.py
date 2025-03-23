@@ -22,19 +22,15 @@ import re
 import ssl
 import subprocess
 import sys
-from typing import Union
 import urllib.error
 import urllib.request
+from typing import Union
 
-from error import GitError
-from error import UploadError
-from git_command import GitCommand
-from git_refs import R_CHANGES
-from git_refs import R_HEADS
-from git_refs import R_TAGS
 import platform_utils
+from error import GitError, UploadError
+from git_command import GitCommand, GitRequireError
+from git_refs import R_CHANGES, R_HEADS, R_TAGS
 from repo_trace import Trace
-
 
 # Prefix that is prepended to all the keys of SyncAnalysisState's data
 # that is saved in the config.
@@ -552,6 +548,17 @@ def GetUrlCookieFile(url, quiet):
     cookiefile = GitConfig.ForUser().GetString("http.cookiefile")
     if cookiefile:
         cookiefile = os.path.expanduser(cookiefile)
+    else:
+        raise GitRequireError(
+            f"""
+    ERROR: No cookiefile for android.googlesource found.
+    Please follow these steps to resolve the issue:
+       1. Visit https://android.googlesource.com to generate a password.
+       2. Configure git to use a cookiefile.
+       3. Execute the appropriate script (bash or zsh) in your terminal.
+       4. Run 'repo sync' again.
+            """
+        )
     yield cookiefile, None
 
 
