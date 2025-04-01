@@ -27,40 +27,31 @@ import sys
 import tarfile
 import tempfile
 import time
-from typing import List, NamedTuple
 import urllib.parse
+from typing import List, NamedTuple
 
-from color import Coloring
-from error import DownloadError
-from error import GitAuthError
-from error import GitError
-from error import ManifestInvalidPathError
-from error import ManifestInvalidRevisionError
-from error import ManifestParseError
-from error import NoManifestException
-from error import RepoError
-from error import UploadError
 import fetch
-from git_command import git_require
-from git_command import GitCommand
-from git_config import GetSchemeFromUrl
-from git_config import GetUrlCookieFile
-from git_config import GitConfig
-from git_config import IsId
-from git_refs import GitRefs
-from git_refs import HEAD
-from git_refs import R_HEADS
-from git_refs import R_M
-from git_refs import R_PUB
-from git_refs import R_TAGS
-from git_refs import R_WORKTREE_M
 import git_superproject
-from git_trace2_event_log import EventLog
 import platform_utils
 import progress
+from color import Coloring
+from error import (
+    DownloadError,
+    GitAuthError,
+    GitError,
+    ManifestInvalidPathError,
+    ManifestInvalidRevisionError,
+    ManifestParseError,
+    NoManifestException,
+    RepoError,
+    UploadError,
+)
+from git_command import GitCommand, GitRequireError, git_require
+from git_config import GetSchemeFromUrl, GetUrlCookieFile, GitConfig, IsId
+from git_refs import HEAD, R_HEADS, R_M, R_PUB, R_TAGS, R_WORKTREE_M, GitRefs
+from git_trace2_event_log import EventLog
 from repo_logging import RepoLogger
 from repo_trace import Trace
-
 
 logger = RepoLogger(__file__)
 
@@ -1316,6 +1307,36 @@ class Project:
                 logger.warning("warn: Cannot remove archive %s: %s", tarpath, e)
             self._CopyAndLinkFiles()
             return SyncNetworkHalfResult(True)
+
+        cookiefile = GitConfig.ForUser().GetString("http.cookiefile")
+        if not cookiefile:
+            raise GitRequireError(
+                f"""
+    ==================================================================
+        ERROR: Missing Cookiefile for android.googlesource.com
+    ==================================================================
+
+    It appears that no cookiefile has been configured in your Git settings
+    for authenticating with android.googlesource.com. This file is essential
+    for secure communication and access.
+
+    Please follow these detailed steps to resolve the issue:
+
+        1. Visit the URL below in your browser to generate the required password
+           credentials:
+           https://android.googlesource.com
+
+        2. Configure Git to use the generated cookiefile by running:
+           git config --global http.cookiefile /path/to/your/cookiefile
+
+        3. Execute the initialization script appropriate for your shell environment
+           (bash or zsh) in your terminal to finalize the setup.
+
+        4. Once the above steps are completed, please run 'repo sync' again.
+
+    ==================================================================
+            """
+            )
 
         # If the shared object dir already exists, don't try to rebootstrap with
         # a clone bundle download.  We should have the majority of objects
