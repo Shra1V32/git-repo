@@ -1326,13 +1326,10 @@ class Project:
            credentials:
            https://android.googlesource.com
 
-        2. Configure Git to use the generated cookiefile by running:
-           git config --global http.cookiefile /path/to/your/cookiefile
-
-        3. Execute the initialization script appropriate for your shell environment
+        2. Execute the initialization script appropriate for your shell environment
            (bash or zsh) in your terminal to finalize the setup.
 
-        4. Once the above steps are completed, please run 'repo sync' again.
+        3. Once the above steps are completed, please run 'repo sync' again.
 
     ==================================================================
             """
