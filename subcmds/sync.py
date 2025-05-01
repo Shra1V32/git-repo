@@ -14,6 +14,7 @@
 
 import collections
 import functools
+import hashlib
 import http.cookiejar as cookielib
 import io
 import json
@@ -1732,9 +1733,12 @@ later is required to fix a server side protocol bug.
         errors = []
         try:
             self._ExecuteHelper(opt, args, errors)
+            self._NotifySyncFinished(self.manifest, "success")
         except (RepoExitError, RepoChangedException):
+            self._NotifySyncFinished(self.manifest, "failed")
             raise
         except (KeyboardInterrupt, Exception) as e:
+            self._NotifySyncFinished(self.manifest, "error")
             raise RepoUnhandledExceptionError(e, aggregate_errors=errors)
 
     def _ExecuteHelper(self, opt, args, errors):
@@ -1958,6 +1962,40 @@ later is required to fix a server side protocol bug.
 
         if not opt.quiet:
             print("repo sync has finished successfully.")
+
+    def _NotifySyncFinished(self, manifest, status):
+        """Notify the server that repo sync reached a terminal state."""
+        try:
+            import getpass
+            import subprocess
+
+            username = getpass.getuser()
+            workspace_path = manifest.topdir if manifest else os.getcwd()
+            workspace_hash = hashlib.sha256(
+                workspace_path.encode("utf-8")
+            ).hexdigest()[:12]
+            project = os.path.basename(workspace_path) if workspace_path else "Unknown"
+            payload = {
+                "type": "finished",
+                "username": username,
+                "project": project,
+                "workspace_path": workspace_path,
+                "workspace_hash": workspace_hash,
+                "status": status,
+                "timestamp": time.time(),
+            }
+
+            cmd = [
+                "redis-cli",
+                "LPUSH",
+                "global:repo_sync_notifications",
+                json.dumps(payload),
+            ]
+            subprocess.Popen(
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+        except Exception:
+            pass
 
 
 def _PostRepoUpgrade(manifest, quiet=False):

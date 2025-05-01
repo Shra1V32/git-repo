@@ -109,6 +109,8 @@ class Progress:
         # Save the last message for displaying on refresh.
         self._last_msg = None
         self._show_elapsed = show_elapsed
+        self._last_redis_push_time = 0
+        self._last_redis_push_percent = -1
         self._update_event = _threading.Event()
         self._update_thread = _threading.Thread(
             target=self._update_loop,
@@ -155,6 +157,8 @@ class Progress:
             msg = self._last_msg
         self._last_msg = msg
 
+        self._MaybePushToRedis()
+
         if not _TTY or IsTraceToStderr() or self._quiet:
             return
 
@@ -194,6 +198,62 @@ class Progress:
                     CSI_ERASE_LINE_AFTER,
                 )
             )
+
+    def _MaybePushToRedis(self):
+        """Throttled push of progress data to Redis."""
+        try:
+            now = time.time()
+            if self._total > 0:
+                percent = int((100 * self._done) / self._total)
+            else:
+                percent = -1
+
+            time_diff = now - self._last_redis_push_time
+            percent_diff = abs(percent - self._last_redis_push_percent)
+
+            if time_diff > 3 or (percent != -1 and percent_diff >= 2):
+                self._last_redis_push_time = now
+                self._last_redis_push_percent = percent
+                self._PushToRedis(percent)
+        except Exception:
+            pass
+
+    def _PushToRedis(self, percent):
+        """Perform the actual push to Redis without blocking repo sync."""
+        try:
+            import getpass
+            import hashlib
+            import json
+            import subprocess
+
+            username = getpass.getuser()
+            workspace_path = os.getcwd()
+            workspace_hash = hashlib.sha256(
+                workspace_path.encode("utf-8")
+            ).hexdigest()[:12]
+            payload = {
+                "type": "progress",
+                "username": username,
+                "workspace_path": workspace_path,
+                "workspace_hash": workspace_hash,
+                "title": self._title,
+                "done": self._done,
+                "total": self._total,
+                "percent": percent,
+                "timestamp": time.time(),
+            }
+
+            cmd = [
+                "redis-cli",
+                "LPUSH",
+                "global:repo_sync_notifications",
+                json.dumps(payload),
+            ]
+            subprocess.Popen(
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+        except Exception:
+            pass
 
     def end(self):
         self._update_event.set()
