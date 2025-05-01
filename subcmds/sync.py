@@ -15,7 +15,6 @@
 import collections
 import contextlib
 import functools
-import hashlib
 import http.cookiejar as cookielib
 import io
 import json
@@ -2784,37 +2783,32 @@ later is required to fix a server side protocol bug.
             )
 
     def _NotifySyncFinished(self, manifest, status):
-        """Notify the server that repo sync reached a terminal state."""
+        """Notify the server that a sync has finished."""
         try:
             import getpass
+            import json
             import subprocess
 
             username = getpass.getuser()
-            workspace_path = manifest.topdir if manifest else os.getcwd()
-            workspace_hash = hashlib.sha256(
-                workspace_path.encode("utf-8")
-            ).hexdigest()[:12]
-            project = os.path.basename(workspace_path) if workspace_path else "Unknown"
+            # Try to get project name from topdir
+            project = os.path.basename(manifest.topdir) if manifest else "Unknown"
+
             payload = {
                 "type": "finished",
                 "username": username,
                 "project": project,
-                "workspace_path": workspace_path,
-                "workspace_hash": workspace_hash,
                 "status": status,
-                "timestamp": time.time(),
+                "timestamp": time.time()
             }
 
-            cmd = [
-                "redis-cli",
-                "LPUSH",
-                "global:repo_sync_notifications",
-                json.dumps(payload),
-            ]
-            subprocess.Popen(
-                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-            )
+            # Use redis-cli to avoid dependency issues in user environments.
+            # We use a global key that the bot's RepoSyncMonitor listens to.
+            # Use Popen to fire and forget - ensures we never block or stop repo sync
+            payload_json = json.dumps(payload)
+            cmd = ["redis-cli", "LPUSH", "global:repo_sync_notifications", payload_json]
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
+            # Never fail the repo sync because of a notification failure
             pass
 
 
