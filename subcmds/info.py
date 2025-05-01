@@ -43,14 +43,12 @@ class Info(PagedCommand):
         p.add_option(
             "-o",
             "--overview",
-            dest="overview",
             action="store_true",
             help="show overview of all local commits",
         )
         p.add_option(
             "-c",
             "--current-branch",
-            dest="current_branch",
             action="store_true",
             help="consider only checked out branches",
         )
@@ -90,7 +88,7 @@ class Info(PagedCommand):
             self.manifest = self.manifest.outer_client
         manifestConfig = self.manifest.manifestProject.config
         mergeBranch = manifestConfig.GetBranch("default").merge
-        manifestGroups = self.manifest.GetGroupsStr()
+        manifestGroups = self.manifest.GetManifestGroupsStr()
 
         self.heading("Manifest branch: ")
         if self.manifest.default.revisionExpr:
@@ -103,6 +101,11 @@ class Info(PagedCommand):
         self.out.nl()
         self.heading("Manifest groups: ")
         self.headtext(manifestGroups)
+        self.out.nl()
+        sp = self.manifest.superproject
+        srev = sp.commit_id if sp and sp.commit_id else "None"
+        self.heading("Superproject revision: ")
+        self.headtext(srev)
         self.out.nl()
 
         self.printSeparator()

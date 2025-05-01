@@ -21,6 +21,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+import pytest
 from test_manifest_xml import sort_attributes
 
 import git_superproject
@@ -145,6 +146,7 @@ class SuperprojectTestCase(unittest.TestCase):
         )
         self.assertIsNone(manifest.superproject)
 
+    @pytest.mark.skip_cq("TODO(b/266734831): Find out why this takes 8m+ in CQ")
     def test_superproject_get_superproject_invalid_url(self):
         """Test with an invalid url."""
         manifest = self.getXmlManifest(
@@ -168,6 +170,7 @@ class SuperprojectTestCase(unittest.TestCase):
         self.assertFalse(sync_result.success)
         self.assertTrue(sync_result.fatal)
 
+    @pytest.mark.skip_cq("TODO(b/266734831): Find out why this takes 8m+ in CQ")
     def test_superproject_get_superproject_invalid_branch(self):
         """Test with an invalid branch."""
         manifest = self.getXmlManifest(
@@ -457,6 +460,62 @@ class SuperprojectTestCase(unittest.TestCase):
                         '<superproject name="superproject"/>'
                         "</manifest>",
                     )
+
+    def test_Init_success(self):
+        """Test _Init succeeds and creates the work git dir."""
+        self.assertFalse(os.path.exists(self._superproject._work_git))
+        with mock.patch(
+            "git_superproject.GitCommand", autospec=True
+        ) as mock_git_command:
+            instance = mock_git_command.return_value
+            instance.Wait.return_value = 0
+
+            self.assertTrue(self._superproject._Init())
+
+            mock_git_command.assert_called_once()
+            args, kwargs = mock_git_command.call_args
+            self.assertEqual(args[1][:2], ["init", "--bare"])
+
+            tmp_git_name = args[1][2]
+            self.assertTrue(
+                tmp_git_name.startswith(".tmp-superproject-initgitdir-")
+            )
+            self.assertTrue(os.path.exists(self._superproject._work_git))
+
+            tmp_git_path = os.path.join(
+                self._superproject._superproject_path, tmp_git_name
+            )
+            self.assertFalse(os.path.exists(tmp_git_path))
+
+    def test_Init_already_exists(self):
+        """Test _Init returns early if the work git dir already exists."""
+        os.mkdir(self._superproject._superproject_path)
+        os.mkdir(self._superproject._work_git)
+        with mock.patch(
+            "git_superproject.GitCommand", autospec=True
+        ) as mock_git_command:
+            self.assertTrue(self._superproject._Init())
+            mock_git_command.assert_not_called()
+
+    def test_Init_failure_cleans_up(self):
+        """Test _Init cleans up the temporary directory if 'git init' fails."""
+        with mock.patch(
+            "git_superproject.GitCommand", autospec=True
+        ) as mock_git_command:
+            instance = mock_git_command.return_value
+            instance.Wait.return_value = 1
+            instance.stderr = "mock git init failure"
+
+            self.assertFalse(self._superproject._Init())
+            mock_git_command.assert_called_once()
+            args, kwargs = mock_git_command.call_args
+            tmp_git_name = args[1][2]
+
+            tmp_git_path = os.path.join(
+                self._superproject._superproject_path, tmp_git_name
+            )
+            self.assertFalse(os.path.exists(tmp_git_path))
+            self.assertFalse(os.path.exists(self._superproject._work_git))
 
     def test_Fetch(self):
         manifest = self.getXmlManifest(

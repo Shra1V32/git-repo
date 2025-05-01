@@ -42,7 +42,7 @@ SYNC_STATE_PREFIX = "repo.syncstate."
 
 ID_RE = re.compile(r"^[0-9a-f]{40}$")
 
-REVIEW_CACHE = dict()
+REVIEW_CACHE = {}
 
 
 def IsChange(rev):
@@ -111,7 +111,7 @@ class GitConfig:
         return cls(configfile=os.path.join(gitdir, "config"), defaults=defaults)
 
     def __init__(self, configfile, defaults=None, jsonFile=None):
-        self.file = configfile
+        self.file = str(configfile)
         self.defaults = defaults
         self._cache_dict = None
         self._section_dict = None
@@ -220,6 +220,12 @@ class GitConfig:
         """Set the truthy value for a key."""
         if value is not None:
             value = "true" if value else "false"
+        self.SetString(name, value)
+
+    def SetInt(self, name: str, value: int) -> None:
+        """Set an integer value for a key."""
+        if value is not None:
+            value = str(value)
         self.SetString(name, value)
 
     def GetString(self, name: str, all_keys: bool = False) -> Union[str, None]:

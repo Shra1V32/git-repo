@@ -1,4 +1,4 @@
-# Copyright 2021 The Android Open Source Project
+# Copyright (C) 2021 The Android Open Source Project
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,39 +14,35 @@
 
 """Unittests for the platform_utils.py module."""
 
-import os
-import tempfile
-import unittest
+from pathlib import Path
+
+import pytest
 
 import platform_utils
 
 
-class RemoveTests(unittest.TestCase):
-    """Check remove() helper."""
+def test_remove_missing_ok(tmp_path: Path) -> None:
+    """Check missing_ok handling."""
+    path = tmp_path / "test"
 
-    def testMissingOk(self):
-        """Check missing_ok handling."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = os.path.join(tmpdir, "test")
+    # Should not fail.
+    platform_utils.remove(path, missing_ok=True)
 
-            # Should not fail.
-            platform_utils.remove(path, missing_ok=True)
+    # Should fail.
+    with pytest.raises(OSError):
+        platform_utils.remove(path)
+    with pytest.raises(OSError):
+        platform_utils.remove(path, missing_ok=False)
 
-            # Should fail.
-            self.assertRaises(OSError, platform_utils.remove, path)
-            self.assertRaises(
-                OSError, platform_utils.remove, path, missing_ok=False
-            )
+    # Should not fail if it exists.
+    path.touch()
+    platform_utils.remove(path, missing_ok=True)
+    assert not path.exists()
 
-            # Should not fail if it exists.
-            open(path, "w").close()
-            platform_utils.remove(path, missing_ok=True)
-            self.assertFalse(os.path.exists(path))
+    path.touch()
+    platform_utils.remove(path)
+    assert not path.exists()
 
-            open(path, "w").close()
-            platform_utils.remove(path)
-            self.assertFalse(os.path.exists(path))
-
-            open(path, "w").close()
-            platform_utils.remove(path, missing_ok=False)
-            self.assertFalse(os.path.exists(path))
+    path.touch()
+    platform_utils.remove(path, missing_ok=False)
+    assert not path.exists()

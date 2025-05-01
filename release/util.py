@@ -14,8 +14,9 @@
 
 """Random utility code for release tools."""
 
-import os
+from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 
@@ -23,8 +24,9 @@ import sys
 assert sys.version_info >= (3, 6), "This module requires Python 3.6+"
 
 
-TOPDIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-HOMEDIR = os.path.expanduser("~")
+THIS_FILE = Path(__file__).resolve()
+TOPDIR = THIS_FILE.parent.parent
+HOMEDIR = Path("~").expanduser()
 
 
 # These are the release keys we sign with.
@@ -35,12 +37,7 @@ KEYID_ECC = "E1F9040D7A3F6DAFAC897CD3D3B95DA243E48A39"
 
 def cmdstr(cmd):
     """Get a nicely quoted shell command."""
-    ret = []
-    for arg in cmd:
-        if not re.match(r"^[a-zA-Z0-9/_.=-]+$", arg):
-            arg = f'"{arg}"'
-        ret.append(arg)
-    return " ".join(ret)
+    return " ".join(shlex.quote(x) for x in cmd)
 
 
 def run(opts, cmd, check=True, **kwargs):
@@ -58,7 +55,7 @@ def run(opts, cmd, check=True, **kwargs):
 def import_release_key(opts):
     """Import the public key of the official release repo signing key."""
     # Extract the key from our repo launcher.
-    launcher = getattr(opts, "launcher", os.path.join(TOPDIR, "repo"))
+    launcher = getattr(opts, "launcher", TOPDIR / "repo")
     print(f'Importing keys from "{launcher}" launcher script')
     with open(launcher, encoding="utf-8") as fp:
         data = fp.read()

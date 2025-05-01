@@ -17,35 +17,20 @@
 import contextlib
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
+from typing import Optional
 import unittest
+from unittest import mock
+
+import utils_for_test
 
 import error
-import git_command
 import git_config
 import manifest_xml
 import platform_utils
 import project
-
-
-@contextlib.contextmanager
-def TempGitTree():
-    """Create a new empty git checkout for testing."""
-    with tempfile.TemporaryDirectory(prefix="repo-tests") as tempdir:
-        # Tests need to assume, that main is default branch at init,
-        # which is not supported in config until 2.28.
-        cmd = ["git", "init"]
-        if git_command.git_require((2, 28, 0)):
-            cmd += ["--initial-branch=main"]
-        else:
-            # Use template dir for init.
-            templatedir = tempfile.mkdtemp(prefix=".test-template")
-            with open(os.path.join(templatedir, "HEAD"), "w") as fp:
-                fp.write("ref: refs/heads/main\n")
-            cmd += ["--template", templatedir]
-        subprocess.check_call(cmd, cwd=tempdir)
-        yield tempdir
 
 
 class FakeProject:
@@ -63,13 +48,16 @@ class FakeProject:
         )
         self.config = git_config.GitConfig.ForRepository(gitdir=self.gitdir)
 
+    def RelPath(self, local: Optional[bool] = None) -> str:
+        return self.name
+
 
 class ReviewableBranchTests(unittest.TestCase):
     """Check ReviewableBranch behavior."""
 
     def test_smoke(self):
         """A quick run through everything."""
-        with TempGitTree() as tempdir:
+        with utils_for_test.TempGitTree() as tempdir:
             fakeproj = FakeProject(tempdir)
 
             # Generate some commits.
@@ -115,6 +103,29 @@ class ProjectTests(unittest.TestCase):
             project.Project._encode_patchset_description("abcd00!! +"),
             "abcd00%21%21_%2b",
         )
+
+    @unittest.skipUnless(
+        utils_for_test.supports_reftable(),
+        "git reftable support is required for this test",
+    )
+    def test_get_head_unborn_reftable(self):
+        with tempfile.TemporaryDirectory(prefix="repo-tests") as tempdir:
+            subprocess.check_call(
+                [
+                    "git",
+                    "-c",
+                    "init.defaultRefFormat=reftable",
+                    "init",
+                    "-q",
+                    tempdir,
+                ]
+            )
+            fakeproj = FakeProject(tempdir)
+            expected = subprocess.check_output(
+                ["git", "-C", tempdir, "symbolic-ref", "-q", "HEAD"],
+                encoding="utf-8",
+            ).strip()
+            self.assertEqual(expected, fakeproj.work_git.GetHead())
 
 
 class CopyLinkTestCase(unittest.TestCase):
@@ -359,6 +370,7 @@ class MigrateWorkTreeTests(unittest.TestCase):
     """Check _MigrateOldWorkTreeGitDir handling."""
 
     _SYMLINKS = {
+        # go/keep-sorted start
         "config",
         "description",
         "hooks",
@@ -367,9 +379,11 @@ class MigrateWorkTreeTests(unittest.TestCase):
         "objects",
         "packed-refs",
         "refs",
+        "reftable",
         "rr-cache",
         "shallow",
         "svn",
+        # go/keep-sorted end
     }
     _FILES = {
         "COMMIT_EDITMSG",
@@ -448,6 +462,25 @@ class MigrateWorkTreeTests(unittest.TestCase):
             for name in self._SYMLINKS:
                 self.assertTrue((dotgit / name).is_symlink())
 
+    def test_reftable_anchor_with_refs_dir(self):
+        """Migrate when reftable/ and refs/ are directories."""
+        with self._simple_layout() as tempdir:
+            dotgit = tempdir / "src/test/.git"
+            (dotgit / "refs").unlink()
+            (dotgit / "refs").mkdir()
+            (dotgit / "refs" / "heads").write_text("dummy")
+
+            (dotgit / "reftable").unlink()
+            (dotgit / "reftable").mkdir()
+            (dotgit / "reftable" / "tables.list").write_text("dummy")
+            project.Project._MigrateOldWorkTreeGitDir(str(dotgit))
+
+            self.assertTrue(dotgit.is_symlink())
+            self.assertEqual(
+                os.readlink(dotgit),
+                os.path.normpath("../../.repo/projects/src/test.git"),
+            )
+
 
 class ManifestPropertiesFetchedCorrectly(unittest.TestCase):
     """Ensure properties are fetched properly."""
@@ -467,7 +500,7 @@ class ManifestPropertiesFetchedCorrectly(unittest.TestCase):
     def test_manifest_config_properties(self):
         """Test we are fetching the manifest config properties correctly."""
 
-        with TempGitTree() as tempdir:
+        with utils_for_test.TempGitTree() as tempdir:
             fakeproj = self.setUpManifest(tempdir)
 
             # Set property using the expected Set method, then ensure
@@ -534,3 +567,230 @@ class ManifestPropertiesFetchedCorrectly(unittest.TestCase):
 
             fakeproj.config.SetString("manifest.platform", "auto")
             self.assertEqual(fakeproj.manifest_platform, "auto")
+
+
+class StatelessSyncTests(unittest.TestCase):
+    """Tests for stateless sync strategy."""
+
+    def _get_project(self, tempdir):
+        manifest = mock.MagicMock()
+        manifest.manifestProject.depth = None
+        manifest.manifestProject.dissociate = False
+        manifest.manifestProject.clone_filter = None
+        manifest.is_multimanifest = False
+        manifest.manifestProject.config.GetBoolean.return_value = False
+
+        remote = mock.MagicMock()
+        remote.name = "origin"
+        remote.url = "http://"
+
+        proj = project.Project(
+            manifest=manifest,
+            name="test-project",
+            remote=remote,
+            gitdir=os.path.join(tempdir, ".git"),
+            objdir=os.path.join(tempdir, ".git"),
+            worktree=tempdir,
+            relpath="test-project",
+            revisionExpr="1234abcd",
+            revisionId=None,
+            sync_strategy="stateless",
+        )
+        proj._CheckForImmutableRevision = mock.MagicMock(return_value=False)
+        proj._LsRemote = mock.MagicMock(
+            return_value="1234abcd\trefs/heads/main\n"
+        )
+        proj.bare_git = mock.MagicMock()
+        proj.bare_git.rev_parse.return_value = "5678abcd"
+        proj.bare_git.rev_list.return_value = ["0"]
+        proj.IsDirty = mock.MagicMock(return_value=False)
+        proj.GetBranches = mock.MagicMock(return_value=[])
+        proj.DeleteWorktree = mock.MagicMock()
+        proj._InitGitDir = mock.MagicMock()
+        proj._RemoteFetch = mock.MagicMock(return_value=True)
+        proj._InitRemote = mock.MagicMock()
+        proj._InitMRef = mock.MagicMock()
+        return proj
+
+    def test_sync_network_half_stateless_prune_needed(self):
+        """Test stateless sync queues prune when needed."""
+        with utils_for_test.TempGitTree() as tempdir:
+            proj = self._get_project(tempdir)
+            res = proj.Sync_NetworkHalf()
+
+            self.assertTrue(res.success)
+            proj.DeleteWorktree.assert_not_called()
+            self.assertTrue(proj.stateless_prune_needed)
+            proj._RemoteFetch.assert_called_once()
+
+    def test_sync_local_half_stateless_prune(self):
+        """Test stateless GC pruning is queued in Sync_LocalHalf."""
+        with utils_for_test.TempGitTree() as tempdir:
+            proj = self._get_project(tempdir)
+            proj.stateless_prune_needed = True
+
+            proj._Checkout = mock.MagicMock()
+            proj._InitWorkTree = mock.MagicMock()
+            proj.IsRebaseInProgress = mock.MagicMock(return_value=False)
+            proj.IsCherryPickInProgress = mock.MagicMock(return_value=False)
+            proj.bare_ref = mock.MagicMock()
+            proj.bare_ref.all = {}
+            proj.GetRevisionId = mock.MagicMock(return_value="1234abcd")
+            proj._CopyAndLinkFiles = mock.MagicMock()
+
+            proj.work_git = mock.MagicMock()
+            proj.work_git.GetHead.return_value = "5678abcd"
+
+            syncbuf = project.SyncBuffer(proj.config)
+
+            with mock.patch("project.GitCommand") as mock_git_cmd:
+                mock_cmd_instance = mock.MagicMock()
+                mock_cmd_instance.Wait.return_value = 0
+                mock_git_cmd.return_value = mock_cmd_instance
+
+                proj.Sync_LocalHalf(syncbuf)
+                syncbuf.Finish()
+
+            self.assertEqual(mock_git_cmd.call_count, 2)
+            mock_git_cmd.assert_any_call(
+                proj, ["reflog", "expire", "--expire=all", "--all"], bare=True
+            )
+            mock_git_cmd.assert_any_call(
+                proj,
+                ["gc", "--prune=now"],
+                bare=True,
+                capture_stdout=True,
+                capture_stderr=True,
+            )
+
+    def test_sync_network_half_stateless_skips_if_stash(self):
+        """Test stateless sync skips if stash exists."""
+        with utils_for_test.TempGitTree() as tempdir:
+            proj = self._get_project(tempdir)
+            proj.HasStash = mock.MagicMock(return_value=True)
+
+            res = proj.Sync_NetworkHalf()
+
+            self.assertTrue(res.success)
+            self.assertFalse(getattr(proj, "stateless_prune_needed", False))
+
+    def test_sync_network_half_stateless_skips_if_local_commits(self):
+        """Test stateless sync skips if there are local-only commits."""
+        with utils_for_test.TempGitTree() as tempdir:
+            proj = self._get_project(tempdir)
+            proj.bare_git.rev_list.return_value = ["1"]
+
+            res = proj.Sync_NetworkHalf()
+
+            self.assertTrue(res.success)
+            self.assertFalse(getattr(proj, "stateless_prune_needed", False))
+
+
+class SyncOptimizationTests(unittest.TestCase):
+    """Tests for sync optimization logic involving shallow clones."""
+
+    def _get_project(self, tempdir, depth=None):
+        manifest = mock.MagicMock()
+        manifest.manifestProject.depth = depth
+        manifest.manifestProject.dissociate = False
+        manifest.manifestProject.clone_filter = None
+        manifest.is_multimanifest = False
+        manifest.manifestProject.config.GetBoolean.return_value = False
+        manifest.IsMirror = False
+
+        remote = mock.MagicMock()
+        remote.name = "origin"
+        remote.url = "http://"
+
+        proj = project.Project(
+            manifest=manifest,
+            name="test-project",
+            remote=remote,
+            gitdir=os.path.join(tempdir, "gitdir"),
+            objdir=os.path.join(tempdir, "objdir"),
+            worktree=tempdir,
+            relpath="test-project",
+            revisionExpr="0123456789abcdef0123456789abcdef01234567",
+            revisionId=None,
+        )
+        proj._CheckForImmutableRevision = mock.MagicMock(return_value=True)
+        proj.DeleteWorktree = mock.MagicMock()
+        proj._InitGitDir = mock.MagicMock()
+        proj._InitRemote = mock.MagicMock()
+        proj._InitMRef = mock.MagicMock()
+        return proj
+
+    def test_sync_network_half_shallow_missing_fetches(self):
+        """Test Sync_NetworkHalf fetches if shallow file is missing."""
+        with utils_for_test.TempGitTree() as tempdir:
+            proj = self._get_project(tempdir, depth=1)
+            # Ensure gitdir does not exist to simulate new project
+            if os.path.exists(proj.gitdir):
+                shutil.rmtree(proj.gitdir)
+            shallow_path = os.path.join(proj.gitdir, "shallow")
+            if os.path.exists(shallow_path):
+                os.unlink(shallow_path)
+
+            proj._RemoteFetch = mock.MagicMock(return_value=True)
+
+            res = proj.Sync_NetworkHalf(optimized_fetch=True)
+
+            self.assertTrue(res.success)
+            proj._RemoteFetch.assert_called_once()
+
+    def test_sync_network_half_shallow_exists_skips(self):
+        """Test Sync_NetworkHalf skips fetch if shallow file exists."""
+        with utils_for_test.TempGitTree() as tempdir:
+            proj = self._get_project(tempdir, depth=1)
+            os.makedirs(proj.gitdir, exist_ok=True)
+            os.makedirs(proj.objdir, exist_ok=True)
+            with open(os.path.join(proj.gitdir, "shallow"), "w") as f:
+                f.write("")
+
+            proj._RemoteFetch = mock.MagicMock()
+
+            res = proj.Sync_NetworkHalf(optimized_fetch=True)
+
+            self.assertTrue(res.success)
+            proj._RemoteFetch.assert_not_called()
+
+    def test_remote_fetch_shallow_missing_fetches(self):
+        """Test _RemoteFetch fetches if shallow file is missing."""
+        with utils_for_test.TempGitTree() as tempdir:
+            proj = self._get_project(tempdir, depth=1)
+            shallow_path = os.path.join(proj.gitdir, "shallow")
+            if os.path.exists(shallow_path):
+                os.unlink(shallow_path)
+
+            with mock.patch("project.GitCommand") as mock_git_cmd:
+                mock_cmd_instance = mock.MagicMock()
+                mock_cmd_instance.Wait.return_value = 0
+                mock_git_cmd.return_value = mock_cmd_instance
+
+                res = proj._RemoteFetch(
+                    current_branch_only=True,
+                    depth=1,
+                    use_superproject=False,
+                )
+
+                self.assertTrue(res)
+                mock_git_cmd.assert_called()
+
+    def test_remote_fetch_shallow_exists_skips(self):
+        """Test _RemoteFetch skips fetch if shallow file exists."""
+        with utils_for_test.TempGitTree() as tempdir:
+            proj = self._get_project(tempdir, depth=1)
+            os.makedirs(proj.gitdir, exist_ok=True)
+            os.makedirs(proj.objdir, exist_ok=True)
+            with open(os.path.join(proj.gitdir, "shallow"), "w") as f:
+                f.write("")
+
+            with mock.patch("project.GitCommand") as mock_git_cmd:
+                res = proj._RemoteFetch(
+                    current_branch_only=True,
+                    depth=1,
+                    use_superproject=False,
+                )
+
+                self.assertTrue(res)
+                mock_git_cmd.assert_not_called()

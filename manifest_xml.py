@@ -155,6 +155,7 @@ class _Default:
     upstreamExpr = None
     remote = None
     sync_j = None
+    sync_j_max = None
     sync_c = False
     sync_s = False
     sync_tags = True
@@ -255,7 +256,7 @@ class _XmlSubmanifest:
       project: a string, the name of the manifest project.
       revision: a string, the commitish.
       manifestName: a string, the submanifest file name.
-      groups: a list of strings, the groups to add to all projects in the
+      groups: a set of strings, the groups to add to all projects in the
           submanifest.
       default_groups: a list of strings, the default groups to sync.
       path: a string, the relative path for the submanifest checkout.
@@ -281,7 +282,7 @@ class _XmlSubmanifest:
         self.project = project
         self.revision = revision
         self.manifestName = manifestName
-        self.groups = groups
+        self.groups = groups or set()
         self.default_groups = default_groups
         self.path = path
         self.parent = parent
@@ -304,7 +305,7 @@ class _XmlSubmanifest:
         self.repo_client = RepoClient(
             parent.repodir,
             linkFile,
-            parent_groups=",".join(groups) or "",
+            parent_groups=groups,
             submanifest_path=os.path.join(parent.path_prefix, self.relpath),
             outer_client=outer_client,
             default_groups=default_groups,
@@ -345,7 +346,7 @@ class _XmlSubmanifest:
         manifestName = self.manifestName or "default.xml"
         revision = self.revision or self.name
         path = self.path or revision.split("/")[-1]
-        groups = self.groups or []
+        groups = self.groups
 
         return SubmanifestSpec(
             self.name, manifestUrl, manifestName, revision, path, groups
@@ -359,9 +360,7 @@ class _XmlSubmanifest:
 
     def GetGroupsStr(self):
         """Returns the `groups` given for this submanifest."""
-        if self.groups:
-            return ",".join(self.groups)
-        return ""
+        return ",".join(sorted(self.groups))
 
     def GetDefaultGroupsStr(self):
         """Returns the `default-groups` given for this submanifest."""
@@ -381,7 +380,7 @@ class SubmanifestSpec:
         self.manifestName = manifestName
         self.revision = revision
         self.path = path
-        self.groups = groups or []
+        self.groups = groups
 
 
 class XmlManifest:
@@ -393,7 +392,7 @@ class XmlManifest:
         manifest_file,
         local_manifests=None,
         outer_client=None,
-        parent_groups="",
+        parent_groups=None,
         submanifest_path="",
         default_groups=None,
     ):
@@ -409,7 +408,8 @@ class XmlManifest:
                 manifests. This will usually be
                 |repodir|/|LOCAL_MANIFESTS_DIR_NAME|.
             outer_client: RepoClient of the outer manifest.
-            parent_groups: a string, the groups to apply to this projects.
+            parent_groups: a set of strings, the groups to apply to this
+                manifest.
             submanifest_path: The submanifest root relative to the repo root.
             default_groups: a string, the default manifest groups to use.
         """
@@ -432,7 +432,7 @@ class XmlManifest:
             self.manifestFileOverrides = {}
         self.local_manifests = local_manifests
         self._load_local_manifests = True
-        self.parent_groups = parent_groups
+        self.parent_groups = parent_groups or set()
         self.default_groups = default_groups
 
         if submanifest_path and not outer_client:
@@ -567,21 +567,29 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
         """
         return [x for x in re.split(r"[,\s]+", field) if x]
 
+    def _ParseSet(self, field):
+        """Parse fields that contain flattened sets.
+
+        These are whitespace & comma separated.  Empty elements will be
+        discarded.
+        """
+        return set(self._ParseList(field))
+
     def ToXml(
         self,
         peg_rev=False,
         peg_rev_upstream=True,
         peg_rev_dest_branch=True,
-        groups=None,
+        filter_groups=None,
         omit_local=False,
     ):
         """Return the current manifest XML."""
         mp = self.manifestProject
 
-        if groups is None:
-            groups = mp.manifest_groups
-        if groups:
-            groups = self._ParseList(groups)
+        if filter_groups is None:
+            filter_groups = mp.manifest_groups
+        if filter_groups:
+            filter_groups = self._ParseList(filter_groups)
 
         doc = xml.dom.minidom.Document()
         root = doc.createElement("manifest")
@@ -624,6 +632,9 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
         if d.sync_j is not None:
             have_default = True
             e.setAttribute("sync-j", "%d" % d.sync_j)
+        if d.sync_j_max is not None:
+            have_default = True
+            e.setAttribute("sync-j-max", "%d" % d.sync_j_max)
         if d.sync_c:
             have_default = True
             e.setAttribute("sync-c", "true")
@@ -654,7 +665,7 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
                     output_project(parent, parent_node, project)
 
         def output_project(parent, parent_node, p):
-            if not p.MatchesGroups(groups):
+            if not p.MatchesGroups(filter_groups):
                 return
 
             if omit_local and self.IsFromLocalManifest(p):
@@ -725,10 +736,9 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
                 le.setAttribute("dest", lf.dest)
                 e.appendChild(le)
 
-            default_groups = ["all", "name:%s" % p.name, "path:%s" % p.relpath]
-            egroups = [g for g in p.groups if g not in default_groups]
-            if egroups:
-                e.setAttribute("groups", ",".join(egroups))
+            groups = p.groups - {"all", f"name:{p.name}", f"path:{p.relpath}"}
+            if groups:
+                e.setAttribute("groups", ",".join(sorted(groups)))
 
             for a in p.annotations:
                 if a.keep == "true":
@@ -749,14 +759,17 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
             if p.clone_depth:
                 e.setAttribute("clone-depth", str(p.clone_depth))
 
+            if p.sync_strategy:
+                e.setAttribute("sync-strategy", str(p.sync_strategy))
+
             self._output_manifest_project_extras(p, e)
 
             if p.subprojects:
                 subprojects = {subp.name for subp in p.subprojects}
-                output_projects(p, e, list(sorted(subprojects)))
+                output_projects(p, e, sorted(subprojects))
 
         projects = {p.name for p in self._paths.values() if not p.parent}
-        output_projects(None, root, list(sorted(projects)))
+        output_projects(None, root, sorted(projects))
 
         if self._repo_hooks_project:
             root.appendChild(doc.createTextNode(""))
@@ -813,7 +826,6 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
             "submanifest",
             # These are children of 'project' nodes.
             "annotation",
-            "project",
             "copyfile",
             "linkfile",
         }
@@ -1014,9 +1026,9 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
 
     def SetManifestOverride(self, path):
         """Override manifestFile.  The caller must call Unload()"""
-        self._outer_client.manifest.manifestFileOverrides[
-            self.path_prefix
-        ] = path
+        self._outer_client.manifest.manifestFileOverrides[self.path_prefix] = (
+            path
+        )
 
     @property
     def UseLocalManifests(self):
@@ -1116,7 +1128,7 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
             groups += f",platform-{platform.system().lower()}"
         return groups
 
-    def GetGroupsStr(self):
+    def GetManifestGroupsStr(self):
         """Returns the manifest group string that should be synced."""
         return (
             self.manifestProject.manifest_groups or self.GetDefaultGroupsStr()
@@ -1171,12 +1183,12 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
                     b = b[len(R_HEADS) :]
                 self.branch = b
 
-                parent_groups = self.parent_groups
+                parent_groups = self.parent_groups.copy()
                 if self.path_prefix:
-                    parent_groups = (
+                    parent_groups |= {
                         f"{SUBMANIFEST_GROUP_PREFIX}:path:"
-                        f"{self.path_prefix},{parent_groups}"
-                    )
+                        f"{self.path_prefix}"
+                    }
 
                 # The manifestFile was specified by the user which is why we
                 # allow include paths to point anywhere.
@@ -1202,16 +1214,16 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
                                 # Since local manifests are entirely managed by
                                 # the user, allow them to point anywhere the
                                 # user wants.
-                                local_group = (
+                                local_group = {
                                     f"{LOCAL_MANIFEST_GROUP_PREFIX}:"
                                     f"{local_file[:-4]}"
-                                )
+                                }
                                 nodes.append(
                                     self._ParseManifestXml(
                                         local,
                                         self.subdir,
                                         parent_groups=(
-                                            f"{local_group},{parent_groups}"
+                                            local_group | parent_groups
                                         ),
                                         restrict_includes=False,
                                     )
@@ -1262,7 +1274,7 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
         self,
         path,
         include_root,
-        parent_groups="",
+        parent_groups=None,
         restrict_includes=True,
         parent_node=None,
     ):
@@ -1271,11 +1283,11 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
         Args:
             path: The XML file to read & parse.
             include_root: The path to interpret include "name"s relative to.
-            parent_groups: The groups to apply to this projects.
+            parent_groups: The set of groups to apply to this manifest.
             restrict_includes: Whether to constrain the "name" attribute of
                 includes.
-            parent_node: The parent include node, to apply attribute to this
-                projects.
+            parent_node: The parent include node, to apply attributes to this
+                manifest.
 
         Returns:
             List of XML nodes.
@@ -1299,6 +1311,14 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
 
         nodes = []
         for node in manifest.childNodes:
+            if (
+                parent_node
+                and node.nodeName in ("include", "project")
+                and not node.hasAttribute("revision")
+            ):
+                node.setAttribute(
+                    "revision", parent_node.getAttribute("revision")
+                )
             if node.nodeName == "include":
                 name = self._reqatt(node, "name")
                 if restrict_includes:
@@ -1307,12 +1327,10 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
                         raise ManifestInvalidPathError(
                             f'<include> invalid "name": {name}: {msg}'
                         )
-                include_groups = ""
-                if parent_groups:
-                    include_groups = parent_groups
+                include_groups = (parent_groups or set()).copy()
                 if node.hasAttribute("groups"):
-                    include_groups = (
-                        node.getAttribute("groups") + "," + include_groups
+                    include_groups |= self._ParseSet(
+                        node.getAttribute("groups")
                     )
                 fp = os.path.join(include_root, name)
                 if not os.path.isfile(fp):
@@ -1328,33 +1346,23 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
                     )
                 # should isolate this to the exact exception, but that's
                 # tricky.  actual parsing implementation may vary.
-                except (
-                    KeyboardInterrupt,
-                    RuntimeError,
-                    SystemExit,
-                    ManifestParseError,
-                ):
+                except (RuntimeError, ManifestParseError):
                     raise
                 except Exception as e:
                     raise ManifestParseError(
                         f"failed parsing included manifest {name}: {e}"
                     )
             else:
-                if parent_groups and node.nodeName == "project":
-                    nodeGroups = parent_groups
-                    if node.hasAttribute("groups"):
-                        nodeGroups = (
-                            node.getAttribute("groups") + "," + nodeGroups
-                        )
-                    node.setAttribute("groups", nodeGroups)
-                if (
-                    parent_node
-                    and node.nodeName == "project"
-                    and not node.hasAttribute("revision")
+                if parent_groups and node.nodeName in (
+                    "project",
+                    "extend-project",
                 ):
-                    node.setAttribute(
-                        "revision", parent_node.getAttribute("revision")
-                    )
+                    nodeGroups = parent_groups.copy()
+                    if node.hasAttribute("groups"):
+                        nodeGroups |= self._ParseSet(
+                            node.getAttribute("groups")
+                        )
+                    node.setAttribute("groups", ",".join(sorted(nodeGroups)))
                 nodes.append(node)
         return nodes
 
@@ -1463,7 +1471,7 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
                 dest_path = node.getAttribute("dest-path")
                 groups = node.getAttribute("groups")
                 if groups:
-                    groups = self._ParseList(groups)
+                    groups = self._ParseSet(groups or "")
                 revision = node.getAttribute("revision")
                 remote_name = node.getAttribute("remote")
                 if not remote_name:
@@ -1484,7 +1492,15 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
                     if path and p.relpath != path:
                         continue
                     if groups:
-                        p.groups.extend(groups)
+                        p.groups |= groups
+                    # Drop local groups so we don't mistakenly omit this
+                    # project from the superproject override manifest.
+                    p.groups = {
+                        g
+                        for g in p.groups
+                        if not g.startswith(LOCAL_MANIFEST_GROUP_PREFIX)
+                    }
+
                     if revision:
                         if base_revision:
                             if p.revisionExpr != base_revision:
@@ -1513,6 +1529,14 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
                         ) = self.GetProjectPaths(name, dest_path, remote.name)
                         p.UpdatePaths(relpath, worktree, gitdir, objdir)
                         self._paths[p.relpath] = p
+
+                    for n in node.childNodes:
+                        if n.nodeName == "copyfile":
+                            self._ParseCopyFile(p, n)
+                        elif n.nodeName == "linkfile":
+                            self._ParseLinkFile(p, n)
+                        elif n.nodeName == "annotation":
+                            self._ParseAnnotation(p, n)
 
             if node.nodeName == "repo-hooks":
                 # Only one project can be the hooks project
@@ -1745,6 +1769,13 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
                 % (self.manifestFile, d.sync_j)
             )
 
+        d.sync_j_max = XmlInt(node, "sync-j-max", None)
+        if d.sync_j_max is not None and d.sync_j_max <= 0:
+            raise ManifestParseError(
+                '%s: sync-j-max must be greater than 0, not "%s"'
+                % (self.manifestFile, d.sync_j_max)
+            )
+
         d.sync_c = XmlBool(node, "sync-c", False)
         d.sync_s = XmlBool(node, "sync-s", False)
         d.sync_tags = XmlBool(node, "sync-tags", True)
@@ -1807,7 +1838,7 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
         groups = ""
         if node.hasAttribute("groups"):
             groups = node.getAttribute("groups")
-        groups = self._ParseList(groups)
+        groups = self._ParseSet(groups)
         default_groups = self._ParseList(node.getAttribute("default-groups"))
         path = node.getAttribute("path")
         if path == "":
@@ -1910,16 +1941,13 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
                 % (self.manifestFile, clone_depth)
             )
 
+        sync_strategy = node.getAttribute("sync-strategy") or None
+
         dest_branch = (
             node.getAttribute("dest-branch") or self._default.destBranchExpr
         )
 
         upstream = node.getAttribute("upstream") or self._default.upstreamExpr
-
-        groups = ""
-        if node.hasAttribute("groups"):
-            groups = node.getAttribute("groups")
-        groups = self._ParseList(groups)
 
         if parent is None:
             (
@@ -1935,8 +1963,11 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
                 parent, name, path
             )
 
-        default_groups = ["all", "name:%s" % name, "path:%s" % relpath]
-        groups.extend(set(default_groups).difference(groups))
+        groups = ""
+        if node.hasAttribute("groups"):
+            groups = node.getAttribute("groups")
+        groups = self._ParseSet(groups)
+        groups |= {"all", f"name:{name}", f"path:{relpath}"}
 
         if self.IsMirror and node.hasAttribute("force-path"):
             if XmlBool(node, "force-path", False):
@@ -1958,6 +1989,7 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
             sync_s=sync_s,
             sync_tags=sync_tags,
             clone_depth=clone_depth,
+            sync_strategy=sync_strategy,
             upstream=upstream,
             parent=parent,
             dest_branch=dest_branch,
@@ -1968,11 +2000,11 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
         for n in node.childNodes:
             if n.nodeName == "copyfile":
                 self._ParseCopyFile(project, n)
-            if n.nodeName == "linkfile":
+            elif n.nodeName == "linkfile":
                 self._ParseLinkFile(project, n)
-            if n.nodeName == "annotation":
+            elif n.nodeName == "annotation":
                 self._ParseAnnotation(project, n)
-            if n.nodeName == "project":
+            elif n.nodeName == "project":
                 project.subprojects.append(
                     self._ParseProject(n, parent=project)
                 )
@@ -2112,22 +2144,22 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
         # implementation:
         # https://eclipse.googlesource.com/jgit/jgit/+/9110037e3e9461ff4dac22fee84ef3694ed57648/org.eclipse.jgit/src/org/eclipse/jgit/lib/ObjectChecker.java#884
         BAD_CODEPOINTS = {
-            "\u200C",  # ZERO WIDTH NON-JOINER
-            "\u200D",  # ZERO WIDTH JOINER
-            "\u200E",  # LEFT-TO-RIGHT MARK
-            "\u200F",  # RIGHT-TO-LEFT MARK
-            "\u202A",  # LEFT-TO-RIGHT EMBEDDING
-            "\u202B",  # RIGHT-TO-LEFT EMBEDDING
-            "\u202C",  # POP DIRECTIONAL FORMATTING
-            "\u202D",  # LEFT-TO-RIGHT OVERRIDE
-            "\u202E",  # RIGHT-TO-LEFT OVERRIDE
-            "\u206A",  # INHIBIT SYMMETRIC SWAPPING
-            "\u206B",  # ACTIVATE SYMMETRIC SWAPPING
-            "\u206C",  # INHIBIT ARABIC FORM SHAPING
-            "\u206D",  # ACTIVATE ARABIC FORM SHAPING
-            "\u206E",  # NATIONAL DIGIT SHAPES
-            "\u206F",  # NOMINAL DIGIT SHAPES
-            "\uFEFF",  # ZERO WIDTH NO-BREAK SPACE
+            "\u200c",  # ZERO WIDTH NON-JOINER
+            "\u200d",  # ZERO WIDTH JOINER
+            "\u200e",  # LEFT-TO-RIGHT MARK
+            "\u200f",  # RIGHT-TO-LEFT MARK
+            "\u202a",  # LEFT-TO-RIGHT EMBEDDING
+            "\u202b",  # RIGHT-TO-LEFT EMBEDDING
+            "\u202c",  # POP DIRECTIONAL FORMATTING
+            "\u202d",  # LEFT-TO-RIGHT OVERRIDE
+            "\u202e",  # RIGHT-TO-LEFT OVERRIDE
+            "\u206a",  # INHIBIT SYMMETRIC SWAPPING
+            "\u206b",  # ACTIVATE SYMMETRIC SWAPPING
+            "\u206c",  # INHIBIT ARABIC FORM SHAPING
+            "\u206d",  # ACTIVATE ARABIC FORM SHAPING
+            "\u206e",  # NATIONAL DIGIT SHAPES
+            "\u206f",  # NOMINAL DIGIT SHAPES
+            "\ufeff",  # ZERO WIDTH NO-BREAK SPACE
         }
         if BAD_CODEPOINTS & path_codepoints:
             # This message is more expansive than reality, but should be fine.

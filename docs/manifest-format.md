@@ -51,6 +51,7 @@ following DTD:
   <!ATTLIST default dest-branch CDATA #IMPLIED>
   <!ATTLIST default upstream    CDATA #IMPLIED>
   <!ATTLIST default sync-j      CDATA #IMPLIED>
+  <!ATTLIST default sync-j-max  CDATA #IMPLIED>
   <!ATTLIST default sync-c      CDATA #IMPLIED>
   <!ATTLIST default sync-s      CDATA #IMPLIED>
   <!ATTLIST default sync-tags   CDATA #IMPLIED>
@@ -59,7 +60,7 @@ following DTD:
   <!ATTLIST manifest-server url CDATA #REQUIRED>
 
   <!ELEMENT submanifest EMPTY>
-  <!ATTLIST submanifest name           ID #REQUIRED>
+  <!ATTLIST submanifest name           ID    #REQUIRED>
   <!ATTLIST submanifest remote         IDREF #IMPLIED>
   <!ATTLIST submanifest project        CDATA #IMPLIED>
   <!ATTLIST submanifest manifest-name  CDATA #IMPLIED>
@@ -72,18 +73,19 @@ following DTD:
                      project*,
                      copyfile*,
                      linkfile*)>
-  <!ATTLIST project name        CDATA #REQUIRED>
-  <!ATTLIST project path        CDATA #IMPLIED>
-  <!ATTLIST project remote      IDREF #IMPLIED>
-  <!ATTLIST project revision    CDATA #IMPLIED>
-  <!ATTLIST project dest-branch CDATA #IMPLIED>
-  <!ATTLIST project groups      CDATA #IMPLIED>
-  <!ATTLIST project sync-c      CDATA #IMPLIED>
-  <!ATTLIST project sync-s      CDATA #IMPLIED>
-  <!ATTLIST project sync-tags   CDATA #IMPLIED>
-  <!ATTLIST project upstream CDATA #IMPLIED>
-  <!ATTLIST project clone-depth CDATA #IMPLIED>
-  <!ATTLIST project force-path CDATA #IMPLIED>
+  <!ATTLIST project name          CDATA #REQUIRED>
+  <!ATTLIST project path          CDATA #IMPLIED>
+  <!ATTLIST project remote        IDREF #IMPLIED>
+  <!ATTLIST project revision      CDATA #IMPLIED>
+  <!ATTLIST project dest-branch   CDATA #IMPLIED>
+  <!ATTLIST project groups        CDATA #IMPLIED>
+  <!ATTLIST project sync-c        CDATA #IMPLIED>
+  <!ATTLIST project sync-s        CDATA #IMPLIED>
+  <!ATTLIST project sync-tags     CDATA #IMPLIED>
+  <!ATTLIST project upstream      CDATA #IMPLIED>
+  <!ATTLIST project clone-depth   CDATA #IMPLIED>
+  <!ATTLIST project force-path    CDATA #IMPLIED>
+  <!ATTLIST project sync-strategy CDATA #IMPLIED>
 
   <!ELEMENT annotation EMPTY>
   <!ATTLIST annotation name  CDATA #REQUIRED>
@@ -95,19 +97,21 @@ following DTD:
   <!ATTLIST copyfile dest CDATA #REQUIRED>
 
   <!ELEMENT linkfile EMPTY>
-  <!ATTLIST linkfile src CDATA #REQUIRED>
+  <!ATTLIST linkfile src  CDATA #REQUIRED>
   <!ATTLIST linkfile dest CDATA #REQUIRED>
 
-  <!ELEMENT extend-project EMPTY>
-  <!ATTLIST extend-project name CDATA #REQUIRED>
-  <!ATTLIST extend-project path CDATA #IMPLIED>
-  <!ATTLIST extend-project dest-path CDATA #IMPLIED>
-  <!ATTLIST extend-project groups CDATA #IMPLIED>
-  <!ATTLIST extend-project revision CDATA #IMPLIED>
-  <!ATTLIST extend-project remote CDATA #IMPLIED>
+  <!ELEMENT extend-project (annotation*,
+                            copyfile*,
+                            linkfile*)>
+  <!ATTLIST extend-project name        CDATA #REQUIRED>
+  <!ATTLIST extend-project path        CDATA #IMPLIED>
+  <!ATTLIST extend-project dest-path   CDATA #IMPLIED>
+  <!ATTLIST extend-project groups      CDATA #IMPLIED>
+  <!ATTLIST extend-project revision    CDATA #IMPLIED>
+  <!ATTLIST extend-project remote      CDATA #IMPLIED>
   <!ATTLIST extend-project dest-branch CDATA #IMPLIED>
-  <!ATTLIST extend-project upstream CDATA #IMPLIED>
-  <!ATTLIST extend-project base-rev CDATA #IMPLIED>
+  <!ATTLIST extend-project upstream    CDATA #IMPLIED>
+  <!ATTLIST extend-project base-rev    CDATA #IMPLIED>
 
   <!ELEMENT remove-project EMPTY>
   <!ATTLIST remove-project name     CDATA #IMPLIED>
@@ -116,7 +120,7 @@ following DTD:
   <!ATTLIST remove-project base-rev CDATA #IMPLIED>
 
   <!ELEMENT repo-hooks EMPTY>
-  <!ATTLIST repo-hooks in-project CDATA #REQUIRED>
+  <!ATTLIST repo-hooks in-project   CDATA #REQUIRED>
   <!ATTLIST repo-hooks enabled-list CDATA #REQUIRED>
 
   <!ELEMENT superproject EMPTY>
@@ -125,7 +129,7 @@ following DTD:
   <!ATTLIST superproject revision CDATA #IMPLIED>
 
   <!ELEMENT contactinfo EMPTY>
-  <!ATTLIST contactinfo bugurl  CDATA #REQUIRED>
+  <!ATTLIST contactinfo bugurl CDATA #REQUIRED>
 
   <!ELEMENT include EMPTY>
   <!ATTLIST include name     CDATA #REQUIRED>
@@ -211,7 +215,9 @@ can be found.  Used when syncing a revision locked manifest in
 -c mode to avoid having to sync the entire ref space. Project elements
 not setting their own `upstream` will inherit this value.
 
-Attribute `sync-j`: Number of parallel jobs to use when synching.
+Attribute `sync-j`: Number of parallel jobs to use when syncing.
+
+Attribute `sync-j-max`: Maximum number of parallel jobs to use when syncing.
 
 Attribute `sync-c`: Set to true to only sync the given Git
 branch (specified in the `revision` attribute) rather than the
@@ -285,7 +291,7 @@ should be placed.  If not supplied, `revision` is used.
 
 `path` may not be an absolute path or use "." or ".." path components.
 
-Attribute `groups`: List of additional groups to which all projects
+Attribute `groups`: Set of additional groups to which all projects
 in the included submanifest belong. This appends and recurses, meaning
 all projects in submanifests carry all parent submanifest groups.
 Same syntax as the corresponding element of `project`.
@@ -353,7 +359,7 @@ When using `repo upload`, changes will be submitted for code
 review on this branch. If unspecified both here and in the
 default element, `revision` is used instead.
 
-Attribute `groups`: List of groups to which this project belongs,
+Attribute `groups`: Set of groups to which this project belongs,
 whitespace or comma separated.  All projects belong to the group
 "all", and each project automatically belongs to a group of
 its name:`name` and path:`path`.  E.g. for
@@ -384,6 +390,22 @@ rather than the `name` attribute.  This attribute only applies to the
 local mirrors syncing, it will be ignored when syncing the projects in a
 client working directory.
 
+Attribute `sync-strategy`: Set the sync strategy used when fetching this
+project.  Currently the only supported value is `stateless`.  When set to
+`stateless`, repo will run a reflog expiration and aggressive garbage collection
+at the end of the sync process.  This is useful for projects that contain
+large binary files and use `clone-depth="1"`, where garbage can accumulate
+as binaries are added, deleted, or modified across successive syncs.
+
+During a stateless sync, repo checks the following before cleaning up:
+1. The project does not share an object directory with other projects.
+2. The working tree is clean (no uncommitted changes, no untracked files).
+3. There are no unpushed local commits.
+4. There is no Git stash.
+
+If any of these conditions are not met, repo falls back to a standard
+sync without garbage collection.
+
 ### Element extend-project
 
 Modify the attributes of the named project.
@@ -393,6 +415,11 @@ attributes of an existing project without completely replacing the
 existing project definition.  This makes the local manifest more robust
 against changes to the original manifest.
 
+The `extend-project` element can also contain `annotation`, `copyfile`, and
+`linkfile` child elements. These are added to the project's definition. A
+`copyfile` or `linkfile` with a `dest` that already exists in the project
+will overwrite the original.
+
 Attribute `path`: If specified, limit the change to projects checked out
 at the specified path, rather than all projects with the given name.
 
@@ -401,7 +428,7 @@ of the repo client where the Git working directory for this project
 should be placed.  This is used to move a project in the checkout by
 overriding the existing `path` setting.
 
-Attribute `groups`: List of additional groups to which this project
+Attribute `groups`: Set of additional groups to which this project
 belongs.  Same syntax as the corresponding element of `project`.
 
 Attribute `revision`: If specified, overrides the revision of the original
@@ -427,19 +454,20 @@ Same syntax as the corresponding element of `project`.
 ### Element annotation
 
 Zero or more annotation elements may be specified as children of a
-project or remote element. Each element describes a name-value pair.
-For projects, this name-value pair will be exported into each project's
-environment during a 'forall' command, prefixed with `REPO__`.  In addition,
-there is an optional attribute "keep" which accepts the case insensitive values
-"true" (default) or "false".  This attribute determines whether or not the
+project element, an extend-project element, or a remote element. Each
+element describes a name-value pair. For projects, this name-value pair
+will be exported into each project's environment during a 'forall'
+command, prefixed with `REPO__`.  In addition, there is an optional
+attribute "keep" which accepts the case insensitive values "true"
+(default) or "false". This attribute determines whether or not the
 annotation will be kept when exported with the manifest subcommand.
 
 ### Element copyfile
 
 Zero or more copyfile elements may be specified as children of a
-project element. Each element describes a src-dest pair of files;
-the "src" file will be copied to the "dest" place during `repo sync`
-command.
+project element, or an extend-project element. Each element describes a
+src-dest pair of files; the "src" file will be copied to the "dest"
+place during `repo sync` command.
 
 "src" is project relative, "dest" is relative to the top of the tree.
 Copying from paths outside of the project or to paths outside of the repo
@@ -450,10 +478,14 @@ Intermediate paths must not be symlinks either.
 
 Parent directories of "dest" will be automatically created if missing.
 
+The files are copied in the order they are specified in the manifests.
+If multiple elements specify the same source and destination, they will
+only be applied as one, based on the first occurence. Files are copied
+before any links specified via linkfile elements are created.
+
 ### Element linkfile
 
-It's just like copyfile and runs at the same time as copyfile but
-instead of copying it creates a symlink.
+It's just like copyfile, but instead of copying it creates a symlink.
 
 The symlink is created at "dest" (relative to the top of the tree) and
 points to the path specified by "src" which is a path in the project.
@@ -462,6 +494,11 @@ Parent directories of "dest" will be automatically created if missing.
 
 The symlink target may be a file or directory, but it may not point outside
 of the repo client.
+
+The links are created in the order they are specified in the manifests.
+If multiple elements specify the same source and destination, they will
+only be applied as one, based on the first occurence. Links are created
+after any files specified via copyfile elements are copied.
 
 ### Element remove-project
 
@@ -560,13 +597,16 @@ the manifest repository's root.
 "name" may not be an absolute path or use "." or ".." path components.
 These restrictions are not enforced for [Local Manifests].
 
-Attribute `groups`: List of additional groups to which all projects
+Attribute `groups`: Set of additional groups to which all projects
 in the included manifest belong. This appends and recurses, meaning
 all projects in included manifests carry all parent include groups.
+This also applies to all extend-project elements in the included manifests.
 Same syntax as the corresponding element of `project`.
 
 Attribute `revision`: Name of a Git branch (e.g. `main` or `refs/heads/main`)
-default to which all projects in the included manifest belong.
+default to which all projects in the included manifest belong. This recurses,
+meaning it will apply to all projects in all manifests included as a result of
+this element.
 
 ## Local Manifests {#local-manifests}
 

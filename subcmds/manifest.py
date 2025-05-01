@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import enum
 import json
+import optparse
 import os
 import sys
 
@@ -21,6 +23,16 @@ from repo_logging import RepoLogger
 
 
 logger = RepoLogger(__file__)
+
+
+class OutputFormat(enum.Enum):
+    """Type for the requested output format."""
+
+    # Canonicalized manifest in XML format.
+    XML = enum.auto()
+
+    # Canonicalized manifest in JSON format.
+    JSON = enum.auto()
 
 
 class Manifest(PagedCommand):
@@ -42,6 +54,10 @@ revisions set to the current commit hash.  These are known as
 In this case, the 'upstream' attribute is set to the ref we were on
 when the manifest was generated.  The 'dest-branch' attribute is set
 to indicate the remote ref to push changes to via 'repo upload'.
+
+Multiple output formats are supported via --format.  The default output
+is XML, and formats are generally "condensed".  Use --pretty for more
+human-readable variations.
 """
 
     @property
@@ -86,11 +102,21 @@ to indicate the remote ref to push changes to via 'repo upload'.
             "(only of use if the branch names for a sha1 manifest are "
             "sensitive)",
         )
+        # Replaced with --format=json.  Kept for backwards compatibility.
+        # Can delete in Jun 2026 or later.
         p.add_option(
             "--json",
-            default=False,
-            action="store_true",
-            help="output manifest in JSON format (experimental)",
+            action="store_const",
+            dest="format",
+            const=OutputFormat.JSON.name.lower(),
+            help=optparse.SUPPRESS_HELP,
+        )
+        formats = tuple(x.lower() for x in OutputFormat.__members__.keys())
+        p.add_option(
+            "--format",
+            default=OutputFormat.XML.name.lower(),
+            choices=formats,
+            help=f"output format: {', '.join(formats)} (default: %default)",
         )
         p.add_option(
             "--pretty",
@@ -108,7 +134,6 @@ to indicate the remote ref to push changes to via 'repo upload'.
         p.add_option(
             "-o",
             "--output-file",
-            dest="output_file",
             default="-",
             help="file to save the manifest to. (Filename prefix for "
             "multi-tree.)",
@@ -120,6 +145,8 @@ to indicate the remote ref to push changes to via 'repo upload'.
         # we're using.
         if opt.manifest_name:
             self.manifest.Override(opt.manifest_name, False)
+
+        output_format = OutputFormat[opt.format.upper()]
 
         for manifest in self.ManifestList(opt):
             output_file = opt.output_file
@@ -135,8 +162,7 @@ to indicate the remote ref to push changes to via 'repo upload'.
 
             manifest.SetUseLocalManifests(not opt.ignore_local_manifests)
 
-            if opt.json:
-                logger.warning("warning: --json is experimental!")
+            if output_format == OutputFormat.JSON:
                 doc = manifest.ToDict(
                     peg_rev=opt.peg_rev,
                     peg_rev_upstream=opt.peg_rev_upstream,
@@ -152,7 +178,7 @@ to indicate the remote ref to push changes to via 'repo upload'.
                     "separators": (",", ": ") if opt.pretty else (",", ":"),
                     "sort_keys": True,
                 }
-                fd.write(json.dumps(doc, **json_settings))
+                fd.write(json.dumps(doc, **json_settings) + "\n")
             else:
                 manifest.Save(
                     fd,

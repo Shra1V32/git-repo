@@ -23,16 +23,20 @@ Examples:
 """
 
 import functools
+import glob
 import hashlib
 import os
 import sys
+import tempfile
 import time
 from typing import NamedTuple
+import urllib.parse
 
 from git_command import git_require
 from git_command import GitCommand
 from git_config import RepoConfig
 from git_refs import GitRefs
+import platform_utils
 
 
 _SUPERPROJECT_GIT_NAME = "superproject.git"
@@ -129,6 +133,30 @@ class Superproject:
         self._print_messages = value
 
     @property
+    def commit_id(self):
+        """Returns the commit ID of the superproject checkout."""
+        cmd = ["rev-parse", self.revision]
+        p = GitCommand(
+            None,  # project
+            cmd,
+            gitdir=self._work_git,
+            bare=True,
+            capture_stdout=True,
+            capture_stderr=True,
+        )
+        retval = p.Wait()
+        if retval != 0:
+            self._LogWarning(
+                "git rev-parse call failed, command: git {}, "
+                "return code: {}, stderr: {}",
+                cmd,
+                retval,
+                p.stderr,
+            )
+            return None
+        return p.stdout
+
+    @property
     def project_commit_ids(self):
         """Returns a dictionary of projects and their commit ids."""
         return self._project_commit_ids
@@ -140,12 +168,33 @@ class Superproject:
             self._manifest_path if os.path.exists(self._manifest_path) else None
         )
 
+    @property
+    def repo_id(self):
+        """Returns the repo ID for the superproject.
+
+        For example, if the superproject points to:
+            https://android-review.googlesource.com/platform/superproject/
+        Then the repo_id would be:
+            android/platform/superproject
+        """
+        review_url = self.remote.review
+        if review_url:
+            parsed_url = urllib.parse.urlparse(review_url)
+            netloc = parsed_url.netloc
+            if netloc:
+                parts = netloc.split("-review", 1)
+                host = parts[0]
+                rev = GitRefs(self._work_git).get("HEAD")
+                return f"{host}/{self.name}@{rev}"
+        return None
+
     def _LogMessage(self, fmt, *inputs):
         """Logs message to stderr and _git_event_log."""
         message = f"{self._LogMessagePrefix()} {fmt.format(*inputs)}"
         if self._print_messages:
             print(message, file=sys.stderr)
-        self._git_event_log.ErrorEvent(message, fmt)
+        if self._git_event_log:
+            self._git_event_log.ErrorEvent(message, fmt)
 
     def _LogMessagePrefix(self):
         """Returns the prefix string to be logged in each log message"""
@@ -169,30 +218,63 @@ class Superproject:
         """
         if not os.path.exists(self._superproject_path):
             os.mkdir(self._superproject_path)
-        if not self._quiet and not os.path.exists(self._work_git):
+
+        if os.path.exists(self._work_git):
+            return True
+
+        if not self._quiet:
             print(
                 "%s: Performing initial setup for superproject; this might "
                 "take several minutes." % self._work_git
             )
-        cmd = ["init", "--bare", self._work_git_name]
-        p = GitCommand(
-            None,
-            cmd,
-            cwd=self._superproject_path,
-            capture_stdout=True,
-            capture_stderr=True,
+
+        tmp_gitdir_prefix = ".tmp-superproject-initgitdir-"
+        tmp_gitdir = tempfile.mkdtemp(
+            prefix=tmp_gitdir_prefix,
+            dir=self._superproject_path,
         )
-        retval = p.Wait()
-        if retval:
-            self._LogWarning(
-                "git init call failed, command: git {}, "
-                "return code: {}, stderr: {}",
+        tmp_git_name = os.path.basename(tmp_gitdir)
+
+        try:
+            cmd = ["init", "--bare", tmp_git_name]
+            p = GitCommand(
+                None,
                 cmd,
-                retval,
-                p.stderr,
+                cwd=self._superproject_path,
+                capture_stdout=True,
+                capture_stderr=True,
             )
-            return False
-        return True
+            retval = p.Wait()
+            if retval:
+                self._LogWarning(
+                    "git init call failed, command: git {}, "
+                    "return code: {}, stderr: {}",
+                    cmd,
+                    retval,
+                    p.stderr,
+                )
+                return False
+
+            platform_utils.rename(tmp_gitdir, self._work_git)
+            tmp_gitdir = None
+            return True
+        finally:
+            # Clean up the temporary directory created during the process,
+            # as well as any stale ones left over from previous attempts.
+            if tmp_gitdir and os.path.exists(tmp_gitdir):
+                platform_utils.rmtree(tmp_gitdir)
+
+            age_threshold = 60 * 60 * 24  # 1 day in seconds
+            now = time.time()
+            for tmp_dir in glob.glob(
+                os.path.join(self._superproject_path, f"{tmp_gitdir_prefix}*")
+            ):
+                try:
+                    mtime = os.path.getmtime(tmp_dir)
+                    if now - mtime > age_threshold:
+                        platform_utils.rmtree(tmp_dir)
+                except OSError:
+                    pass
 
     def _Fetch(self):
         """Fetches a superproject for the manifest based on |_remote_url|.
@@ -258,7 +340,7 @@ class Superproject:
         Works only in git repositories.
 
         Returns:
-            data: data returned from 'git ls-tree ...' instead of None.
+            data: data returned from 'git ls-tree ...'. None on error.
         """
         if not os.path.exists(self._work_git):
             self._LogWarning(
@@ -288,6 +370,7 @@ class Superproject:
                 retval,
                 p.stderr,
             )
+            return None
         return data
 
     def Sync(self, git_event_log):
@@ -375,7 +458,8 @@ class Superproject:
             )
             return None
         manifest_str = self._manifest.ToXml(
-            groups=self._manifest.GetGroupsStr(), omit_local=True
+            filter_groups=self._manifest.GetManifestGroupsStr(),
+            omit_local=True,
         ).toxml()
         manifest_path = self._manifest_path
         try:

@@ -22,7 +22,6 @@ from typing import Any, Optional
 
 from error import GitError
 from error import RepoExitError
-from git_refs import HEAD
 from git_trace2_event_log_base import BaseEventLog
 import platform_utils
 from repo_logging import RepoLogger
@@ -48,7 +47,7 @@ logger = RepoLogger(__file__)
 
 
 class _GitCall:
-    @functools.lru_cache(maxsize=None)
+    @functools.lru_cache(maxsize=None)  # noqa: B019
     def version_tuple(self):
         ret = Wrapper().ParseGitVersion()
         if ret is None:
@@ -83,7 +82,7 @@ def RepoSourceVersion():
         proj = os.path.dirname(os.path.abspath(__file__))
         env[GIT_DIR] = os.path.join(proj, ".git")
         result = subprocess.run(
-            [GIT, "describe", HEAD],
+            [GIT, "describe", "HEAD"],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             encoding="utf-8",
@@ -96,7 +95,7 @@ def RepoSourceVersion():
                 ver = ver[1:]
         else:
             ver = "unknown"
-        setattr(RepoSourceVersion, "version", ver)
+        RepoSourceVersion.version = ver
 
     return ver
 
@@ -238,9 +237,9 @@ def _build_env(
             s = p + " " + s
         env["GIT_CONFIG_PARAMETERS"] = s
     if "GIT_ALLOW_PROTOCOL" not in env:
-        env[
-            "GIT_ALLOW_PROTOCOL"
-        ] = "file:git:http:https:ssh:persistent-http:persistent-https:sso:rpc"
+        env["GIT_ALLOW_PROTOCOL"] = (
+            "file:git:http:https:ssh:persistent-http:persistent-https:sso:rpc"
+        )
     env["GIT_HTTP_USER_AGENT"] = user_agent.git
 
     if objdir:
@@ -350,9 +349,9 @@ class GitCommand:
                         "Project": e.project,
                         "CommandName": command_name,
                         "Message": str(e),
-                        "ReturnCode": str(e.git_rc)
-                        if e.git_rc is not None
-                        else None,
+                        "ReturnCode": (
+                            str(e.git_rc) if e.git_rc is not None else None
+                        ),
                         "IsError": log_as_error,
                     }
                 )
@@ -612,7 +611,7 @@ class GitCommandError(GitError):
         self.git_stderr = git_stderr
 
     @property
-    @functools.lru_cache(maxsize=None)
+    @functools.lru_cache(maxsize=None)  # noqa: B019
     def suggestion(self):
         """Returns helpful next steps for the given stderr."""
         if not self.git_stderr:

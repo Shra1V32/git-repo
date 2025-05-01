@@ -141,7 +141,6 @@ without iterating through the remaining projects.
         p.add_option(
             "-r",
             "--regex",
-            dest="regex",
             action="store_true",
             help="execute the command only on projects matching regex or "
             "wildcard expression",
@@ -149,7 +148,6 @@ without iterating through the remaining projects.
         p.add_option(
             "-i",
             "--inverse-regex",
-            dest="inverse_regex",
             action="store_true",
             help="execute the command only on projects not matching regex or "
             "wildcard expression",
@@ -157,22 +155,20 @@ without iterating through the remaining projects.
         p.add_option(
             "-g",
             "--groups",
-            dest="groups",
             help="execute the command only on projects matching the specified "
             "groups",
         )
         p.add_option(
             "-c",
             "--command",
-            help="command (and arguments) to execute",
             dest="command",
+            help="command (and arguments) to execute",
             action="callback",
             callback=self._cmd_option,
         )
         p.add_option(
             "-e",
             "--abort-on-errors",
-            dest="abort_on_errors",
             action="store_true",
             help="abort if a command exits unsuccessfully",
         )

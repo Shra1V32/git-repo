@@ -27,6 +27,7 @@ from error import SilentRepoExitError
 from error import UploadError
 from git_command import GitCommand
 from git_refs import R_HEADS
+import git_superproject
 from hooks import RepoHook
 from project import ReviewableBranch
 from repo_logging import RepoLogger
@@ -267,7 +268,6 @@ Gerrit Code Review:  https://www.gerritcodereview.com/
             "--cc",
             type="string",
             action="append",
-            dest="cc",
             help="also send email to these email addresses",
         )
         p.add_option(
@@ -281,7 +281,6 @@ Gerrit Code Review:  https://www.gerritcodereview.com/
         p.add_option(
             "-c",
             "--current-branch",
-            dest="current_branch",
             action="store_true",
             help="upload current git branch",
         )
@@ -310,7 +309,6 @@ Gerrit Code Review:  https://www.gerritcodereview.com/
             "-p",
             "--private",
             action="store_true",
-            dest="private",
             default=False,
             help="upload as a private change (deprecated; use --wip)",
         )
@@ -318,7 +316,6 @@ Gerrit Code Review:  https://www.gerritcodereview.com/
             "-w",
             "--wip",
             action="store_true",
-            dest="wip",
             default=False,
             help="upload as a work-in-progress change",
         )
@@ -628,6 +625,16 @@ Gerrit Code Review:  https://www.gerritcodereview.com/
                 branch.uploaded = False
                 return
 
+        # If using superproject, add the root repo as a push option.
+        manifest = branch.project.manifest
+        push_options = list(opt.push_options)
+        if git_superproject.UseSuperproject(None, manifest):
+            sp = manifest.superproject
+            if sp:
+                r_id = sp.repo_id
+                if r_id:
+                    push_options.append(f"custom-keyed-value=rootRepo:{r_id}")
+
         branch.UploadForReview(
             people,
             dryrun=opt.dryrun,
@@ -640,7 +647,7 @@ Gerrit Code Review:  https://www.gerritcodereview.com/
             ready=opt.ready,
             dest_branch=destination,
             validate_certs=opt.validate_certs,
-            push_options=opt.push_options,
+            push_options=push_options,
             patchset_description=opt.patchset_description,
         )
 
@@ -796,9 +803,10 @@ Gerrit Code Review:  https://www.gerritcodereview.com/
                 project_list=pending_proj_names, worktree_list=pending_worktrees
             ):
                 if LocalSyncState(manifest).IsPartiallySynced():
-                    logger.error(
-                        "Partially synced tree detected. Syncing all projects "
-                        "may resolve issues you're seeing."
+                    logger.info(
+                        "Tip: A partially synced tree was detected. "
+                        "If this failure involves cross-project dependencies, "
+                        "a full `repo sync` might help."
                     )
                 ret = 1
         if ret:

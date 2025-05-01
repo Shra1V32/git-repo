@@ -93,7 +93,7 @@ contain a line that matches both expressions:
         pt = getattr(parser.values, "cmd_argv", None)
         if pt is None:
             pt = []
-            setattr(parser.values, "cmd_argv", pt)
+            parser.values.cmd_argv = pt
 
         if opt_str == "-(":
             pt.append("(")
@@ -120,7 +120,6 @@ contain a line that matches both expressions:
         g.add_option(
             "-r",
             "--revision",
-            dest="revision",
             action="append",
             metavar="TREEish",
             help="Search TREEish, instead of the work tree",

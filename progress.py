@@ -25,7 +25,10 @@ except ImportError:
 from repo_trace import IsTraceToStderr
 
 
-_TTY = sys.stderr.isatty()
+# Capture the original stderr stream. We use this exclusively for progress
+# updates to ensure we talk to the terminal even if stderr is redirected.
+_STDERR = sys.stderr
+_TTY = _STDERR.isatty()
 
 # This will erase all content in the current line (wherever the cursor is).
 # It does not move the cursor, so this is usually followed by \r to move to
@@ -101,6 +104,7 @@ class Progress:
         self._units = units
         self._elide = elide and _TTY
         self._quiet = quiet
+        self._ended = False
 
         # Only show the active jobs section if we run more than one in parallel.
         self._show_jobs = False
@@ -120,6 +124,11 @@ class Progress:
         if not quiet and show_elapsed:
             self._update_thread.start()
 
+    def update_total(self, new_total):
+        """Updates the total if the new total is larger."""
+        if new_total > self._total:
+            self._total = new_total
+
     def _update_loop(self):
         while True:
             self.update(inc=0)
@@ -129,11 +138,11 @@ class Progress:
     def _write(self, s):
         s = "\r" + s
         if self._elide:
-            col = os.get_terminal_size(sys.stderr.fileno()).columns
+            col = os.get_terminal_size(_STDERR.fileno()).columns
             if len(s) > col:
                 s = s[: col - 1] + ".."
-        sys.stderr.write(s)
-        sys.stderr.flush()
+        _STDERR.write(s)
+        _STDERR.flush()
 
     def start(self, name):
         self._active += 1
@@ -152,6 +161,8 @@ class Progress:
             inc: The number of items completed.
             msg: The message to display. If None, use the last message.
         """
+        if self._ended:
+            return
         self._done += inc
         if msg is None:
             msg = self._last_msg
@@ -255,7 +266,26 @@ class Progress:
         except Exception:
             pass
 
+    def display_message(self, msg):
+        """Clears the current progress line and prints a message above it.
+
+        The progress bar is then redrawn on the next line.
+        """
+        if not _TTY or IsTraceToStderr() or self._quiet:
+            return
+
+        # Erase the current line, print the message with a newline,
+        # and then immediately redraw the progress bar on the new line.
+        _STDERR.write("\r" + CSI_ERASE_LINE)
+        _STDERR.write(msg + "\n")
+        _STDERR.flush()
+        self.update(inc=0)
+
     def end(self):
+        if self._ended:
+            return
+        self._ended = True
+
         self._update_event.set()
         if not _TTY or IsTraceToStderr() or self._quiet:
             return
