@@ -31,12 +31,12 @@ GENERATE_MANPAGES = os.environ.get("_REPO_GENERATE_MANPAGES_") == " indeed! "
 # iterating through powers of two until the overall performance no longer
 # improved. The performance of this batch size is not a function of the
 # number of cores on the system.
-WORKER_BATCH_SIZE = 32
+WORKER_BATCH_SIZE = 48
 # How many jobs to run in parallel by default?
 # Always use exactly 24 jobs by default
 DEFAULT_LOCAL_JOBS = 24
 # Hard cap on maximum jobs regardless of any settings
-MAX_JOBS = 24
+MAX_JOBS = 48
 
 class UsageError(RepoExitError):
     """Exception thrown with invalid command usage."""
