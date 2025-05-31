@@ -159,7 +159,7 @@ def remove(path, missing_ok=False):
         elif missing_ok and e.errno == errno.ENOENT:
             pass
         else:
-            raise
+            pass # Workaround for Read-only workspace error for AOSP
 
 
 def walk(top, topdown=True, onerror=None, followlinks=False):
