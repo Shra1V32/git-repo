@@ -407,6 +407,7 @@ later is required to fix a server side protocol bug.
     PARALLEL_JOBS = 0
 
     _JOBS_WARN_THRESHOLD = 100
+    _JOBS_HARD_LIMIT = 24
 
     def _Options(self, p, show_smart=True):
         p.add_option(
@@ -1952,8 +1953,20 @@ later is required to fix a server side protocol bug.
 
         warned = False
         limit_warned = False
+        hard_limit_warned = False
         for name, attr in job_attributes:
             value = getattr(opt, attr)
+
+            if value > self._JOBS_HARD_LIMIT:
+                if not hard_limit_warned:
+                    logger.warning(
+                        "warning: %s is limited to %d",
+                        name,
+                        self._JOBS_HARD_LIMIT,
+                    )
+                    hard_limit_warned = True
+                setattr(opt, attr, self._JOBS_HARD_LIMIT)
+                value = self._JOBS_HARD_LIMIT
 
             if sync_j_max and value > sync_j_max:
                 if not limit_warned:
