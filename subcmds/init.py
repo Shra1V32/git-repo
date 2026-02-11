@@ -350,7 +350,9 @@ to update the working directory files.
                     "initializing repo in your home directory.\n"
                     "This will cause repo to download and check out source files directly into\n"
                     "your home folder, which can lead to significant clutter and potential\n"
-                    "overwriting of your personal files."
+                    "overwriting of your personal files.\n"
+                    "If you proceed and want to undo this, you can remove the initialized\n"
+                    "repo by running: rm -rf .repo"
                 )
 
                 class _Coloring(Coloring):
