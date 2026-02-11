@@ -626,9 +626,15 @@ later is required to fix a server side protocol bug.
 
         g = p.add_option_group("repo Version options")
         g.add_option(
+            "--repo-verify",
+            dest="repo_verify",
+            default=False,
+            action="store_true",
+            help="verify repo source code",
+        )
+        g.add_option(
             "--no-repo-verify",
             dest="repo_verify",
-            default=True,
             action="store_false",
             help="do not verify repo source code",
         )
@@ -2789,7 +2795,7 @@ def _PostRepoUpgrade(manifest, quiet=False):
             project.PostRepoUpgrade()
 
 
-def _PostRepoFetch(rp, repo_verify=True, verbose=False):
+def _PostRepoFetch(rp, repo_verify=False, verbose=False):
     if rp.HasChanges:
         logger.warning("info: A new version of repo is available")
         wrapper = Wrapper()

@@ -467,9 +467,15 @@ def InitParser(parser):
         "--repo-branch", dest="repo_rev", help=optparse.SUPPRESS_HELP
     )
     group.add_option(
+        "--repo-verify",
+        dest="repo_verify",
+        default=False,
+        action="store_true",
+        help="verify repo source code",
+    )
+    group.add_option(
         "--no-repo-verify",
         dest="repo_verify",
-        default=True,
         action="store_false",
         help="do not verify repo source code",
     )
@@ -569,7 +575,7 @@ def check_repo_verify(repo_verify, quiet=False):
     return True
 
 
-def check_repo_rev(dst, rev, repo_verify=True, quiet=False):
+def check_repo_rev(dst, rev, repo_verify=False, quiet=False):
     """Check that |rev| is valid."""
     do_verify = check_repo_verify(repo_verify, quiet=quiet)
     remote_ref, local_rev = resolve_repo_rev(dst, rev)

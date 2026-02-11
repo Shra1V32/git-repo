@@ -46,9 +46,15 @@ need to be performed by an end-user.
     def _Options(self, p):
         g = p.add_option_group("repo Version options")
         g.add_option(
+            "--repo-verify",
+            dest="repo_verify",
+            default=False,
+            action="store_true",
+            help="verify repo source code",
+        )
+        g.add_option(
             "--no-repo-verify",
             dest="repo_verify",
-            default=True,
             action="store_false",
             help="do not verify repo source code",
         )
