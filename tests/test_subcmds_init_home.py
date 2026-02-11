@@ -29,6 +29,8 @@ class InitHomeCheck(unittest.TestCase):
         self.cmd = init.Init()
         self.cmd.manifest = mock.MagicMock()
         self.cmd.git_event_log = mock.MagicMock()
+        self.cmd.client = mock.MagicMock()
+        self.cmd.client.globalConfig = mock.MagicMock()
 
     @mock.patch("os.isatty")
     @mock.patch("os.getcwd")
@@ -37,7 +39,8 @@ class InitHomeCheck(unittest.TestCase):
     @mock.patch("sys.stdin.readline")
     @mock.patch("wrapper.Wrapper")
     @mock.patch("git_command.git_require")
-    def test_home_dir_abort(self, mock_git_require, mock_wrapper, mock_readline, mock_realpath, mock_expanduser, mock_getcwd, mock_isatty):
+    @mock.patch("subcmds.init.logger.warning")
+    def test_home_dir_abort(self, mock_warn, mock_git_require, mock_wrapper, mock_readline, mock_realpath, mock_expanduser, mock_getcwd, mock_isatty):
         """Test aborting when init-ing in home directory."""
         mock_isatty.return_value = True
         mock_getcwd.return_value = "/home/user"
@@ -53,9 +56,9 @@ class InitHomeCheck(unittest.TestCase):
                 self.cmd.Execute(opt, args)
         
         self.assertEqual(cm.exception.code, 1)
-        # Check if the warning was printed to stderr
-        warning_calls = [call for call in mock_stderr.write.call_args_list if "initializing repo in your home directory" in call[0][0]]
-        self.assertTrue(len(warning_calls) > 0)
+        # Check if the warning was logged
+        mock_warn.assert_called_once()
+        self.assertIn("initializing repo in your home directory", mock_warn.call_args[0][0])
 
     @mock.patch("os.isatty")
     @mock.patch("os.getcwd")
@@ -65,7 +68,8 @@ class InitHomeCheck(unittest.TestCase):
     @mock.patch("wrapper.Wrapper")
     @mock.patch("git_command.git_require")
     @mock.patch.object(init.Init, "_SyncManifest")
-    def test_home_dir_continue(self, mock_sync_manifest, mock_git_require, mock_wrapper, mock_readline, mock_realpath, mock_expanduser, mock_getcwd, mock_isatty):
+    @mock.patch("subcmds.init.logger.warning")
+    def test_home_dir_continue(self, mock_warn, mock_sync_manifest, mock_git_require, mock_wrapper, mock_readline, mock_realpath, mock_expanduser, mock_getcwd, mock_isatty):
         """Test continuing when init-ing in home directory."""
         mock_isatty.return_value = True
         mock_getcwd.return_value = "/home/user"
@@ -87,12 +91,12 @@ class InitHomeCheck(unittest.TestCase):
         self.cmd.manifest.manifestProject.Exists = False
 
         with mock.patch("sys.stderr", new_callable=mock.MagicMock) as mock_stderr:
-             with mock.patch("sys.stdout", new_callable=mock.MagicMock):
+             with mock.patch("sys.stdout", new_callable=mock.MagicMock) as mock_stdout:
                 self.cmd.Execute(opt, args)
 
-        # Check if the warning was printed to stderr
-        warning_calls = [call for call in mock_stderr.write.call_args_list if "initializing repo in your home directory" in call[0][0]]
-        self.assertTrue(len(warning_calls) > 0)
+        # Check if the warning was logged
+        mock_warn.assert_called_once()
+        self.assertIn("initializing repo in your home directory", mock_warn.call_args[0][0])
         mock_sync_manifest.assert_called_once()
 
     @mock.patch("os.isatty")
@@ -102,7 +106,8 @@ class InitHomeCheck(unittest.TestCase):
     @mock.patch("wrapper.Wrapper")
     @mock.patch("git_command.git_require")
     @mock.patch.object(init.Init, "_SyncManifest")
-    def test_non_home_dir(self, mock_sync_manifest, mock_git_require, mock_wrapper, mock_realpath, mock_expanduser, mock_getcwd, mock_isatty):
+    @mock.patch("subcmds.init.logger.warning")
+    def test_non_home_dir(self, mock_warn, mock_sync_manifest, mock_git_require, mock_wrapper, mock_realpath, mock_expanduser, mock_getcwd, mock_isatty):
         """Test no warning when not in home directory."""
         mock_isatty.return_value = True
         mock_getcwd.return_value = "/home/user/project"
@@ -122,9 +127,8 @@ class InitHomeCheck(unittest.TestCase):
             with mock.patch("sys.stdout", new_callable=mock.MagicMock):
                 self.cmd.Execute(opt, args)
 
-        # Check if the warning was NOT printed
-        warning_calls = [call for call in mock_stderr.write.call_args_list if "initializing repo in your home directory" in call[0][0]]
-        self.assertEqual(len(warning_calls), 0)
+        # Check if the warning was NOT logged
+        mock_warn.assert_not_called()
         mock_sync_manifest.assert_called_once()
 
     @mock.patch("os.isatty")
@@ -134,7 +138,8 @@ class InitHomeCheck(unittest.TestCase):
     @mock.patch("wrapper.Wrapper")
     @mock.patch("git_command.git_require")
     @mock.patch.object(init.Init, "_SyncManifest")
-    def test_quiet_mode(self, mock_sync_manifest, mock_git_require, mock_wrapper, mock_realpath, mock_expanduser, mock_getcwd, mock_isatty):
+    @mock.patch("subcmds.init.logger.warning")
+    def test_quiet_mode(self, mock_warn, mock_sync_manifest, mock_git_require, mock_wrapper, mock_realpath, mock_expanduser, mock_getcwd, mock_isatty):
         """Test no warning in quiet mode."""
         mock_isatty.return_value = True
         mock_getcwd.return_value = "/home/user"
@@ -153,7 +158,6 @@ class InitHomeCheck(unittest.TestCase):
         with mock.patch("sys.stderr", new_callable=mock.MagicMock) as mock_stderr:
             self.cmd.Execute(opt, args)
 
-        # Check if the warning was NOT printed
-        warning_calls = [call for call in mock_stderr.write.call_args_list if "initializing repo in your home directory" in call[0][0]]
-        self.assertEqual(len(warning_calls), 0)
+        # Check if the warning was NOT logged
+        mock_warn.assert_not_called()
         mock_sync_manifest.assert_called_once()

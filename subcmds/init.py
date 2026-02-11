@@ -346,15 +346,21 @@ to update the working directory files.
             if os.path.realpath(os.getcwd()) == os.path.realpath(
                 os.path.expanduser("~")
             ):
-                print(
-                    "repo: warning: initializing repo in your home directory.\n"
+                logger.warning(
+                    "initializing repo in your home directory.\n"
                     "This will cause repo to download and check out source files directly into\n"
                     "your home folder, which can lead to significant clutter and potential\n"
-                    "overwriting of your personal files.",
-                    file=sys.stderr,
+                    "overwriting of your personal files."
                 )
+
+                class _Coloring(Coloring):
+                    def __init__(self, config):
+                        Coloring.__init__(self, config, "status")
+
+                out = _Coloring(self.client.globalConfig)
+                prompt = out.colorer(fg="yellow")
                 print(
-                    "Are you sure you want to continue [y/N]? ",
+                    prompt("Are you sure you want to continue [y/N]? "),
                     end="",
                     flush=True,
                 )
