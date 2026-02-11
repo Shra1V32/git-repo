@@ -342,6 +342,27 @@ to update the working directory files.
                 self.OptionParser.error("too many arguments to init")
 
     def Execute(self, opt, args):
+        if not opt.quiet and os.isatty(0) and os.isatty(1):
+            if os.path.realpath(os.getcwd()) == os.path.realpath(
+                os.path.expanduser("~")
+            ):
+                print(
+                    "repo: warning: initializing repo in your home directory.\n"
+                    "This will cause repo to download and check out source files directly into\n"
+                    "your home folder, which can lead to significant clutter and potential\n"
+                    "overwriting of your personal files.",
+                    file=sys.stderr,
+                )
+                print(
+                    "Are you sure you want to continue [y/N]? ",
+                    end="",
+                    flush=True,
+                )
+                a = sys.stdin.readline().strip().lower()
+                if a not in ("yes", "y", "t", "true"):
+                    print("repo: aborted by user", file=sys.stderr)
+                    sys.exit(1)
+
         wrapper = Wrapper()
 
         reqs = wrapper.Requirements.from_dir(WrapperDir())
