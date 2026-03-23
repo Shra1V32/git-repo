@@ -390,7 +390,15 @@ def InitParser(parser):
         "--depth",
         type="int",
         default=None,
-        help="create a shallow clone with given depth; " "see git clone",
+        help="create a shallow clone with given depth (default: 1); "
+        "see git clone",
+    )
+    group.add_option(
+        "--no-shallow",
+        action="store_const",
+        dest="depth",
+        const=0,
+        help="fetch the entire history (equivalent to --depth=0)",
     )
     group.add_option(
         "--partial-clone",

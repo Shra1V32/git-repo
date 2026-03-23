@@ -27,10 +27,19 @@ class InitCommand(unittest.TestCase):
 
     def test_cli_parser_good(self):
         """Check valid command line options."""
-        ARGV = ([],)
+        ARGV = (
+            [],
+            ["--no-shallow"],
+            ["--depth", "5"],
+        )
         for argv in ARGV:
             opts, args = self.cmd.OptionParser.parse_args(argv)
             self.cmd.ValidateOptions(opts, args)
+
+    def test_no_shallow_sets_depth_zero(self):
+        """Check --no-shallow sets depth to 0."""
+        opts, args = self.cmd.OptionParser.parse_args(["--no-shallow"])
+        self.assertEqual(opts.depth, 0)
 
     def test_cli_parser_bad(self):
         """Check invalid command line options."""

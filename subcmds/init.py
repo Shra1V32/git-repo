@@ -138,6 +138,16 @@ to update the working directory files.
         # Normally this value is set when instantiating the project, but the
         # manifest project is special and is created when instantiating the
         # manifest which happens before we parse options.
+        depth = opt.depth
+        if depth is None:
+            depth = 1
+            if not opt.quiet:
+                # Use ANSI escape sequence for yellow text
+                yellow_start = "\033[93m"
+                yellow_end = "\033[0m"
+                print(f"{yellow_start}repo: warning: Using depth 1 by default. "
+                      f"To get a full clone, use our custom flag --no-shallow.{yellow_end}")
+
         self.manifest.manifestProject.clone_depth = opt.manifest_depth
         self.manifest.manifestProject.upstream = opt.manifest_upstream_branch
         clone_filter_for_depth = (
@@ -165,7 +175,7 @@ to update the working directory files.
             verbose=opt.verbose,
             current_branch_only=opt.current_branch_only,
             tags=opt.tags,
-            depth=opt.depth,
+            depth=depth,
             git_event_log=self.git_event_log,
             manifest_name=opt.manifest_name,
         ):
