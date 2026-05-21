@@ -167,7 +167,7 @@ class Progress:
         if msg is None:
             msg = self._last_msg
         self._last_msg = msg
- 
+
         # Logic for pushing to Redis (Throttled)
         self._MaybePushToRedis()
 
@@ -182,9 +182,7 @@ class Progress:
                 return
 
         if self._total <= 0:
-            self._write(
-                "%s: %d,%s" % (self._title, self._done, CSI_ERASE_LINE_AFTER)
-            )
+            self._write("%s: %d,%s" % (self._title, self._done, CSI_ERASE_LINE_AFTER))
         else:
             p = (100 * self._done) / self._total
             if self._show_jobs:
@@ -221,7 +219,7 @@ class Progress:
                 p = int((100 * self._done) / self._total)
             else:
                 # For indeterminate progress, we still push every 5 seconds
-                p = -1 
+                p = -1
 
             # Throttle: every 3 seconds or every 2% change
             time_diff = now - self._last_redis_push_time
@@ -238,20 +236,28 @@ class Progress:
         """Perform the actual push to Redis."""
         try:
             import getpass
+            import hashlib
             import json
+            import os
             import subprocess
 
             username = getpass.getuser()
+            workspace_path = os.getcwd()
+            workspace_hash = hashlib.sha256(workspace_path.encode("utf-8")).hexdigest()[
+                :12
+            ]
             payload = {
                 "type": "progress",
                 "username": username,
+                "workspace_path": workspace_path,
+                "workspace_hash": workspace_hash,
                 "title": self._title,
                 "done": self._done,
                 "total": self._total,
                 "percent": p,
-                "timestamp": time.time()
+                "timestamp": time.time(),
             }
-            
+
             payload_json = json.dumps(payload)
             # Use Popen to fire and forget - ensures we never block or stop repo sync
             cmd = ["redis-cli", "LPUSH", "global:repo_sync_notifications", payload_json]

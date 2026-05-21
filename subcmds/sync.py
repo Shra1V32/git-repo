@@ -277,9 +277,7 @@ class ManifestInterruptError(RepoError):
 class TeeStringIO(io.StringIO):
     """StringIO class that can write to an additional destination."""
 
-    def __init__(
-        self, io: Union[io.TextIOWrapper, None], *args, **kwargs
-    ) -> None:
+    def __init__(self, io: Union[io.TextIOWrapper, None], *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.io = io
 
@@ -464,8 +462,7 @@ later is required to fix a server side protocol bug.
         p.add_option(
             "--rebase",
             action="store_true",
-            help="rebase local commits regardless of whether they are "
-            "published",
+            help="rebase local commits regardless of whether they are published",
         )
         p.add_option(
             "-l",
@@ -575,8 +572,7 @@ later is required to fix a server side protocol bug.
         p.add_option(
             "--optimized-fetch",
             action="store_true",
-            help="only fetch projects fixed to sha1 if revision does not exist "
-            "locally",
+            help="only fetch projects fixed to sha1 if revision does not exist locally",
         )
         p.add_option(
             "--retry-fetches",
@@ -613,8 +609,7 @@ later is required to fix a server side protocol bug.
                 "-s",
                 "--smart-sync",
                 action="store_true",
-                help="smart sync using manifest from the latest known good "
-                "build",
+                help="smart sync using manifest from the latest known good build",
             )
             p.add_option(
                 "-t",
@@ -668,9 +663,7 @@ later is required to fix a server side protocol bug.
             or opt.current_branch_only
         )
 
-    def _UpdateProjectsRevisionId(
-        self, opt, args, superproject_logging_data, manifest
-    ):
+    def _UpdateProjectsRevisionId(self, opt, args, superproject_logging_data, manifest):
         """Update revisionId of projects with the commit from the superproject.
 
         This function updates each project's revisionId with the commit hash
@@ -717,9 +710,7 @@ later is required to fix a server side protocol bug.
         for m in self.ManifestList(opt):
             if m.path_prefix not in per_manifest:
                 continue
-            use_super = git_superproject.UseSuperproject(
-                opt.use_superproject, m
-            )
+            use_super = git_superproject.UseSuperproject(opt.use_superproject, m)
             if superproject_logging_data:
                 superproject_logging_data["multimanifest"] = True
             superproject_logging_data.update(
@@ -734,17 +725,14 @@ later is required to fix a server side protocol bug.
                 superproject_logging_data["noworktree"] = True
                 if opt.use_superproject is not False:
                     logger.warning(
-                        "%s: not using superproject because there is no "
-                        "working tree.",
+                        "%s: not using superproject because there is no working tree.",
                         m.path_prefix,
                     )
 
             if not use_super:
                 continue
             m.superproject.SetQuiet(not opt.verbose)
-            print_messages = git_superproject.PrintMessages(
-                opt.use_superproject, m
-            )
+            print_messages = git_superproject.PrintMessages(opt.use_superproject, m)
             m.superproject.SetPrintMessages(print_messages)
             update_result = m.superproject.UpdateProjectsRevisionId(
                 per_manifest[m.path_prefix], git_event_log=self.git_event_log
@@ -809,9 +797,7 @@ later is required to fix a server side protocol bug.
                 verbose=opt.verbose,
                 output_redir=buf,
                 use_superproject=opt.use_superproject,
-                current_branch_only=cls._GetCurrentBranchOnly(
-                    opt, project.manifest
-                ),
+                current_branch_only=cls._GetCurrentBranchOnly(opt, project.manifest),
                 force_sync=opt.force_sync,
                 clone_bundle=opt.clone_bundle,
                 tags=opt.tags,
@@ -943,9 +929,7 @@ later is required to fix a server side protocol bug.
 
         with self.ParallelContext():
             self.get_parallel_context()["projects"] = projects
-            self.get_parallel_context()[
-                "sync_dict"
-            ] = multiprocessing.Manager().dict()
+            self.get_parallel_context()["sync_dict"] = multiprocessing.Manager().dict()
 
             objdir_project_map = {}
             for index, project in enumerate(projects):
@@ -1105,9 +1089,7 @@ later is required to fix a server side protocol bug.
         except KeyboardInterrupt:
             logger.error("Keyboard interrupt while processing %s", project.name)
         except GitError as e:
-            logger.error(
-                "error.GitError: Cannot checkout %s: %s", project.name, e
-            )
+            logger.error("error.GitError: Cannot checkout %s: %s", project.name, e)
             errors.append(e)
         except Exception as e:
             logger.error(
@@ -1139,9 +1121,7 @@ later is required to fix a server side protocol bug.
             ret = True
             for result in results:
                 success = result.success
-                project = self.get_parallel_context()["projects"][
-                    result.project_idx
-                ]
+                project = self.get_parallel_context()["projects"][result.project_idx]
                 start = result.start
                 finish = result.finish
                 self.event_log.AddSync(
@@ -1157,9 +1137,7 @@ later is required to fix a server side protocol bug.
                     self._local_sync_state.SetCheckoutTime(project)
                 else:
                     ret = False
-                    err_results.append(
-                        project.RelPath(local=opt.this_manifest_only)
-                    )
+                    err_results.append(project.RelPath(local=opt.this_manifest_only))
                     if opt.fail_fast:
                         if pool:
                             pool.close()
@@ -1182,9 +1160,7 @@ later is required to fix a server side protocol bug.
                     ),
                     range(len(projects)),
                     callback=_ProcessResults,
-                    output=Progress(
-                        "Checking out", len(all_projects), quiet=opt.quiet
-                    ),
+                    output=Progress("Checking out", len(all_projects), quiet=opt.quiet),
                     # Use chunksize=1 to avoid the chance that some workers are
                     # idle while other workers still have more than one job in
                     # their chunk queue.
@@ -1253,16 +1229,12 @@ later is required to fix a server side protocol bug.
             opt: options given to sync.
         """
         expected = cls._GetPreciousObjectsState(project, opt)
-        actual = (
-            project.config.GetBoolean("extensions.preciousObjects") or False
-        )
+        actual = project.config.GetBoolean("extensions.preciousObjects") or False
         relpath = project.RelPath(local=opt.this_manifest_only)
 
         if expected != actual:
             # If this is unexpected, log it and repair.
-            Trace(
-                f"{relpath} expected preciousObjects={expected}, got {actual}"
-            )
+            Trace(f"{relpath} expected preciousObjects={expected}, got {actual}")
             if expected:
                 if not opt.quiet:
                     print(
@@ -1314,9 +1286,7 @@ later is required to fix a server side protocol bug.
                 cls._SetPreciousObjectsState(project, opt)
             return
 
-        pm = Progress(
-            "Garbage collecting", len(projects), delay=False, quiet=opt.quiet
-        )
+        pm = Progress("Garbage collecting", len(projects), delay=False, quiet=opt.quiet)
         pm.update(inc=0, msg="prescan")
 
         tidy_dirs = {}
@@ -1438,9 +1408,7 @@ later is required to fix a server side protocol bug.
             pack_count > _BLOAT_PACK_COUNT_THRESHOLD
             and size_pack_kb > _BLOAT_SIZE_PACK_THRESHOLD_KB
         )
-        has_excessive_garbage = (
-            size_garbage_kb > _BLOAT_SIZE_GARBAGE_THRESHOLD_KB
-        )
+        has_excessive_garbage = size_garbage_kb > _BLOAT_SIZE_GARBAGE_THRESHOLD_KB
 
         if is_fragmented or has_excessive_garbage:
             return project.name
@@ -1463,9 +1431,7 @@ later is required to fix a server side protocol bug.
         if not projects:
             return
 
-        pm = Progress(
-            "Checking for bloat", len(projects), delay=False, quiet=opt.quiet
-        )
+        pm = Progress("Checking for bloat", len(projects), delay=False, quiet=opt.quiet)
 
         def _ProcessResults(pool, pm, results):
             for result in results:
@@ -1506,9 +1472,7 @@ later is required to fix a server side protocol bug.
                     verbose=opt.verbose,
                     output_redir=buf,
                     use_superproject=opt.use_superproject,
-                    current_branch_only=self._GetCurrentBranchOnly(
-                        opt, manifest
-                    ),
+                    current_branch_only=self._GetCurrentBranchOnly(opt, manifest),
                     force_sync=opt.force_sync,
                     clone_bundle=opt.clone_bundle,
                     tags=opt.tags,
@@ -1677,8 +1641,7 @@ later is required to fix a server side protocol bug.
     def _SmartSyncSetup(self, opt, smart_sync_manifest_path, manifest):
         if not manifest.manifest_server:
             raise SmartSyncError(
-                "error: cannot smart sync: no manifest server defined in "
-                "manifest"
+                "error: cannot smart sync: no manifest server defined in manifest"
             )
 
         manifest_server = manifest.manifest_server
@@ -1729,9 +1692,7 @@ later is required to fix a server side protocol bug.
 
                 if "SYNC_TARGET" in os.environ:
                     target = os.environ["SYNC_TARGET"]
-                    [success, manifest_str] = server.GetApprovedManifest(
-                        branch, target
-                    )
+                    [success, manifest_str] = server.GetApprovedManifest(branch, target)
                 elif (
                     "TARGET_PRODUCT" in os.environ
                     and "TARGET_BUILD_VARIANT" in os.environ
@@ -1742,9 +1703,7 @@ later is required to fix a server side protocol bug.
                         os.environ["TARGET_RELEASE"],
                         os.environ["TARGET_BUILD_VARIANT"],
                     )
-                    [success, manifest_str] = server.GetApprovedManifest(
-                        branch, target
-                    )
+                    [success, manifest_str] = server.GetApprovedManifest(branch, target)
                 elif (
                     "TARGET_PRODUCT" in os.environ
                     and "TARGET_BUILD_VARIANT" in os.environ
@@ -1753,9 +1712,7 @@ later is required to fix a server side protocol bug.
                         os.environ["TARGET_PRODUCT"],
                         os.environ["TARGET_BUILD_VARIANT"],
                     )
-                    [success, manifest_str] = server.GetApprovedManifest(
-                        branch, target
-                    )
+                    [success, manifest_str] = server.GetApprovedManifest(branch, target)
                 else:
                     [success, manifest_str] = server.GetApprovedManifest(branch)
             else:
@@ -1838,9 +1795,7 @@ later is required to fix a server side protocol bug.
                     output_redir=buf,
                     verbose=opt.verbose,
                     use_superproject=opt.use_superproject,
-                    current_branch_only=self._GetCurrentBranchOnly(
-                        opt, mp.manifest
-                    ),
+                    current_branch_only=self._GetCurrentBranchOnly(opt, mp.manifest),
                     force_sync=opt.force_sync,
                     tags=opt.tags,
                     optimized_fetch=opt.optimized_fetch,
@@ -1853,9 +1808,7 @@ later is required to fix a server side protocol bug.
                 if result.error:
                     errors.append(result.error)
             except KeyboardInterrupt:
-                errors.append(
-                    ManifestInterruptError(buf.getvalue(), project=mp.name)
-                )
+                errors.append(ManifestInterruptError(buf.getvalue(), project=mp.name))
                 raise
 
             finish = time.time()
@@ -1897,9 +1850,7 @@ later is required to fix a server side protocol bug.
             self.OptionParser.error("cannot combine -m and -t")
         if opt.manifest_server_username or opt.manifest_server_password:
             if not (opt.smart_sync or opt.smart_tag):
-                self.OptionParser.error(
-                    "-u and -p may only be combined with -s or -t"
-                )
+                self.OptionParser.error("-u and -p may only be combined with -s or -t")
             if None in [
                 opt.manifest_server_username,
                 opt.manifest_server_password,
@@ -2066,9 +2017,7 @@ later is required to fix a server side protocol bug.
         if _REPO_ALLOW_SHALLOW is not None:
             if _REPO_ALLOW_SHALLOW == "1":
                 mp.ConfigureCloneFilterForDepth(None)
-            elif (
-                _REPO_ALLOW_SHALLOW == "0" and mp.clone_filter_for_depth is None
-            ):
+            elif _REPO_ALLOW_SHALLOW == "0" and mp.clone_filter_for_depth is None:
                 mp.ConfigureCloneFilterForDepth("blob:none")
 
         if opt.mp_update:
@@ -2084,9 +2033,7 @@ later is required to fix a server side protocol bug.
         self._UpdateRepoProject(opt, manifest, errors)
 
         superproject_logging_data = {}
-        self._UpdateProjectsRevisionId(
-            opt, args, superproject_logging_data, manifest
-        )
+        self._UpdateProjectsRevisionId(opt, args, superproject_logging_data, manifest)
 
         all_projects = self.GetProjects(
             args,
@@ -2228,9 +2175,7 @@ later is required to fix a server side protocol bug.
                 err_update_linkfiles = True
                 errors.append(e)
                 if opt.fail_fast:
-                    logger.error(
-                        "error: Local update copyfile or linkfile failed."
-                    )
+                    logger.error("error: Local update copyfile or linkfile failed.")
                     raise SyncFailFastError(aggregate_errors=errors)
         return err_update_projects, err_update_linkfiles
 
@@ -2340,9 +2285,7 @@ later is required to fix a server side protocol bug.
 
         err_results = []
         # NB: We don't exit here because this is the last step.
-        err_checkout = not self._Checkout(
-            all_projects, opt, err_results, errors
-        )
+        err_checkout = not self._Checkout(all_projects, opt, err_results, errors)
         if err_checkout:
             err_event.set()
 
@@ -2401,9 +2344,7 @@ later is required to fix a server side protocol bug.
                 if sync_result.error:
                     fetch_errors.append(sync_result.error)
             except KeyboardInterrupt:
-                logger.error(
-                    "Keyboard interrupt while processing %s", project.name
-                )
+                logger.error("Keyboard interrupt while processing %s", project.name)
             except GitError as e:
                 fetch_errors.append(e)
                 logger.error("error.GitError: Cannot fetch %s", e)
@@ -2451,9 +2392,7 @@ later is required to fix a server side protocol bug.
                         if syncbuf.errors:
                             checkout_errors.extend(syncbuf.errors)
                 except KeyboardInterrupt:
-                    logger.error(
-                        "Keyboard interrupt while processing %s", project.name
-                    )
+                    logger.error("Keyboard interrupt while processing %s", project.name)
                 except GitError as e:
                     checkout_errors.append(e)
                     logger.error(
@@ -2586,15 +2525,11 @@ later is required to fix a server side protocol bug.
                     if result.fetch_errors:
                         errors.extend(result.fetch_errors)
                         self._interleaved_err_network = True
-                        self._interleaved_err_network_results.append(
-                            result.relpath
-                        )
+                        self._interleaved_err_network_results.append(result.relpath)
                     if result.checkout_errors:
                         errors.extend(result.checkout_errors)
                         self._interleaved_err_checkout = True
-                        self._interleaved_err_checkout_results.append(
-                            result.relpath
-                        )
+                        self._interleaved_err_checkout_results.append(result.relpath)
 
             if not ret and opt.fail_fast:
                 if pool:
@@ -2648,16 +2583,17 @@ later is required to fix a server side protocol bug.
         sync_progress_thread = self._CreateSyncProgressThread(pm, sync_event)
 
         try:
-            with multiprocessing.Manager() as manager, ssh.ProxyManager(
-                manager
-            ) as ssh_proxy:
+            with (
+                multiprocessing.Manager() as manager,
+                ssh.ProxyManager(manager) as ssh_proxy,
+            ):
                 ssh_proxy.sock()
                 with self.ParallelContext():
                     self.get_parallel_context()["ssh_proxy"] = ssh_proxy
                     # TODO(gavinmak): Use multprocessing.Queue instead of dict.
-                    self.get_parallel_context()[
-                        "sync_dict"
-                    ] = multiprocessing.Manager().dict()
+                    self.get_parallel_context()["sync_dict"] = (
+                        multiprocessing.Manager().dict()
+                    )
                     sync_progress_thread.start()
 
                     try:
@@ -2672,13 +2608,10 @@ later is required to fix a server side protocol bug.
                             if not projects_to_sync:
                                 break
 
-                            pending_relpaths = {
-                                p.relpath for p in projects_to_sync
-                            }
+                            pending_relpaths = {p.relpath for p in projects_to_sync}
                             if previously_pending_relpaths == pending_relpaths:
                                 stalled_projects_str = "\n".join(
-                                    f" - {path}"
-                                    for path in sorted(pending_relpaths)
+                                    f" - {path}" for path in sorted(pending_relpaths)
                                 )
                                 logger.error(
                                     "The following projects failed and could "
@@ -2689,9 +2622,7 @@ later is required to fix a server side protocol bug.
                                 break
                             previously_pending_relpaths = pending_relpaths
 
-                            self.get_parallel_context()[
-                                "projects"
-                            ] = projects_to_sync
+                            self.get_parallel_context()["projects"] = projects_to_sync
                             project_index_map = {
                                 p: i for i, p in enumerate(projects_to_sync)
                             }
@@ -2702,15 +2633,11 @@ later is required to fix a server side protocol bug.
                             # projects in one level can be processed in
                             # parallel, but we must wait for a level to complete
                             # before starting the next.
-                            for level_projects in _SafeCheckoutOrder(
-                                projects_to_sync
-                            ):
+                            for level_projects in _SafeCheckoutOrder(projects_to_sync):
                                 if not level_projects:
                                     continue
 
-                                objdir_project_map = collections.defaultdict(
-                                    list
-                                )
+                                objdir_project_map = collections.defaultdict(list)
                                 for p in level_projects:
                                     objdir_project_map[p.objdir].append(
                                         project_index_map[p]
@@ -2730,9 +2657,7 @@ later is required to fix a server side protocol bug.
                                 )
                                 if not self.ExecuteInParallel(
                                     jobs,
-                                    functools.partial(
-                                        self._SyncProjectList, opt
-                                    ),
+                                    functools.partial(self._SyncProjectList, opt),
                                     work_items,
                                     callback=callback,
                                     output=pm,
@@ -2742,9 +2667,7 @@ later is required to fix a server side protocol bug.
                                     err_event.set()
 
                                 if err_event.is_set() and opt.fail_fast:
-                                    raise SyncFailFastError(
-                                        aggregate_errors=errors
-                                    )
+                                    raise SyncFailFastError(aggregate_errors=errors)
 
                             self._ReloadManifest(None, manifest)
                             project_list = self.GetProjects(
@@ -2786,19 +2709,26 @@ later is required to fix a server side protocol bug.
         """Notify the server that a sync has finished."""
         try:
             import getpass
+            import hashlib
             import json
             import subprocess
 
             username = getpass.getuser()
             # Try to get project name from topdir
             project = os.path.basename(manifest.topdir) if manifest else "Unknown"
+            workspace_path = manifest.topdir if manifest else os.getcwd()
+            workspace_hash = hashlib.sha256(workspace_path.encode("utf-8")).hexdigest()[
+                :12
+            ]
 
             payload = {
                 "type": "finished",
                 "username": username,
                 "project": project,
+                "workspace_path": workspace_path,
+                "workspace_hash": workspace_hash,
                 "status": status,
-                "timestamp": time.time()
+                "timestamp": time.time(),
             }
 
             # Use redis-cli to avoid dependency issues in user environments.
@@ -2838,9 +2768,7 @@ def _PostRepoFetch(rp, repo_verify=True, verbose=False):
             rev = rp.bare_git.describe(rp.GetRevisionId())
         except GitError:
             rev = None
-        _, new_rev = wrapper.check_repo_rev(
-            rp.gitdir, rev, repo_verify=repo_verify
-        )
+        _, new_rev = wrapper.check_repo_rev(rp.gitdir, rev, repo_verify=repo_verify)
         # See if we're held back due to missing signed tag.
         current_revid = rp.bare_git.rev_parse("HEAD")
         new_revid = rp.bare_git.rev_parse("--verify", new_rev)
@@ -2916,9 +2844,7 @@ class LocalSyncState:
 
     def __init__(self, manifest):
         self._manifest = manifest
-        self._path = os.path.join(
-            self._manifest.repodir, ".repo_localsyncstate.json"
-        )
+        self._path = os.path.join(self._manifest.repodir, ".repo_localsyncstate.json")
         self._time = time.time()
         self._state = None
         self._Load()
@@ -3100,7 +3026,7 @@ class PersistentTransport(xmlrpc.client.Transport):
                 raise OSError(
                     f"Parsing the manifest failed: {e}\n"
                     f"Please report this to your manifest server admin.\n"
-                    f'Here is the full response:\n{data.decode("utf-8")}'
+                    f"Here is the full response:\n{data.decode('utf-8')}"
                 )
             p.close()
             return u.close()
