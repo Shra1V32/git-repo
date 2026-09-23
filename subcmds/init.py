@@ -33,6 +33,7 @@ _REPO_ALLOW_SHALLOW = os.environ.get("REPO_ALLOW_SHALLOW")
 
 class Init(InteractiveCommand, MirrorSafeCommand):
     COMMON = True
+    RESPECT_SMART_SYNC_OVERRIDE = False
     MULTI_MANIFEST_SUPPORT = True
     helpSummary = "Initialize a repo client checkout in the current directory"
     helpUsage = """
@@ -179,6 +180,7 @@ to update the working directory files.
             depth=depth,
             git_event_log=self.git_event_log,
             manifest_name=opt.manifest_name,
+            use_local_gitdirs=opt.use_local_gitdirs,
         ):
             manifest_name = opt.manifest_name
             raise UpdateManifestError(

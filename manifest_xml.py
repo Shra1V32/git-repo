@@ -651,6 +651,8 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
         if self._manifest_server:
             e = doc.createElement("manifest-server")
             e.setAttribute("url", self._manifest_server)
+            if self._manifest_server_helper:
+                e.setAttribute("helper", self._manifest_server_helper)
             root.appendChild(e)
             root.appendChild(doc.createTextNode(""))
 
@@ -690,9 +692,9 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
                 e.setAttribute("remote", remoteName)
             if peg_rev:
                 if self.IsMirror:
-                    value = p.bare_git.rev_parse(p.revisionExpr + "^0")
+                    value = p.bare_git.ResolveCommit(p.revisionExpr)
                 else:
-                    value = p.work_git.rev_parse(HEAD + "^0")
+                    value = p.work_git.ResolveCommit(HEAD)
                 e.setAttribute("revision", value)
                 if peg_rev_upstream:
                     if p.upstream:
@@ -1000,6 +1002,11 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
         return self._manifest_server
 
     @property
+    def manifest_server_helper(self):
+        self._Load()
+        return self._manifest_server_helper
+
+    @property
     def CloneBundle(self):
         clone_bundle = self.manifestProject.clone_bundle
         if clone_bundle is None:
@@ -1054,6 +1061,10 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
     @property
     def UseGitWorktrees(self):
         return self.manifestProject.use_worktree
+
+    @property
+    def UseLocalGitDirs(self):
+        return self.manifestProject.use_local_gitdirs
 
     @property
     def IsArchive(self):
@@ -1153,6 +1164,7 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
         self._notice = None
         self.branch = None
         self._manifest_server = None
+        self._manifest_server_helper = None
 
     def Load(self):
         """Read the manifest into memory."""
@@ -1422,11 +1434,13 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
         for node in itertools.chain(*node_list):
             if node.nodeName == "manifest-server":
                 url = self._reqatt(node, "url")
+                helper = node.getAttribute("helper") or None
                 if self._manifest_server is not None:
                     raise ManifestParseError(
                         "duplicate manifest-server in %s" % (self.manifestFile)
                     )
                 self._manifest_server = url
+                self._manifest_server_helper = helper
 
         def recursively_add_projects(project):
             projects = self._projects.setdefault(project.name, [])
@@ -1505,9 +1519,9 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
                         if base_revision:
                             if p.revisionExpr != base_revision:
                                 failed_revision_changes.append(
-                                    "extend-project name %s mismatch base "
-                                    "%s vs revision %s"
-                                    % (name, base_revision, p.revisionExpr)
+                                    f"extend-project name {name}:\n  "
+                                    f"base {base_revision} vs "
+                                    f"revision {p.revisionExpr}"
                                 )
                         p.SetRevision(revision)
 
@@ -1608,9 +1622,9 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
                             if base_revision:
                                 if p.revisionExpr != base_revision:
                                     failed_revision_changes.append(
-                                        "remove-project name %s mismatch base "
-                                        "%s vs revision %s"
-                                        % (name, base_revision, p.revisionExpr)
+                                        f"remove-project name {name}:\n  "
+                                        f"base {base_revision} vs "
+                                        f"revision {p.revisionExpr}"
                                     )
                             del self._paths[p.relpath]
                             if not removed_project:
@@ -1622,13 +1636,9 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
                             if base_revision:
                                 if p.revisionExpr != base_revision:
                                     failed_revision_changes.append(
-                                        "remove-project path %s mismatch base "
-                                        "%s vs revision %s"
-                                        % (
-                                            p.relpath,
-                                            base_revision,
-                                            p.revisionExpr,
-                                        )
+                                        f"remove-project path {p.relpath}:\n  "
+                                        f"base {base_revision} vs "
+                                        f"revision {p.revisionExpr}"
                                     )
                             self._projects[projname].remove(p)
                             del self._paths[p.relpath]
@@ -1650,10 +1660,10 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
                     )
 
         if failed_revision_changes:
+            fail_string = "\n".join(failed_revision_changes)
             raise ManifestParseError(
-                "revision base check failed, rebase patches and update "
-                "base revs for: ",
-                failed_revision_changes,
+                f"detected base-revision mismatch, updates needed:\n"
+                f"{fail_string}",
             )
 
         # Store repo hooks project information.
@@ -2042,15 +2052,21 @@ https://gerrit.googlesource.com/git-repo/+/HEAD/docs/manifest-format.md
             else:
                 namepath = f"{name}.git"
             worktree = os.path.join(self.topdir, path).replace("\\", "/")
-            gitdir = os.path.join(self.subdir, "projects", "%s.git" % path)
-            # We allow people to mix git worktrees & non-git worktrees for now.
-            # This allows for in situ migration of repo clients.
-            if os.path.exists(gitdir) or not self.UseGitWorktrees:
-                objdir = os.path.join(self.repodir, "project-objects", namepath)
-            else:
-                use_git_worktrees = True
-                gitdir = os.path.join(self.repodir, "worktrees", namepath)
+            if self.UseLocalGitDirs:
+                gitdir = os.path.join(worktree, ".git")
                 objdir = gitdir
+            else:
+                gitdir = os.path.join(self.subdir, "projects", "%s.git" % path)
+                # We allow people to mix git worktrees & non-git worktrees for
+                # now. This allows for in situ migration of repo clients.
+                if os.path.exists(gitdir) or not self.UseGitWorktrees:
+                    objdir = os.path.join(
+                        self.repodir, "project-objects", namepath
+                    )
+                else:
+                    use_git_worktrees = True
+                    gitdir = os.path.join(self.repodir, "worktrees", namepath)
+                    objdir = gitdir
         return relpath, worktree, gitdir, objdir, use_git_worktrees
 
     def GetProjectsWithName(self, name, all_manifests=False):

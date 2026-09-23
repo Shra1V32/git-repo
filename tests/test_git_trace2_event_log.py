@@ -33,7 +33,7 @@ import platform_utils
 
 def server_logging_thread(
     socket_path: str,
-    server_ready: threading.Condition,
+    server_ready: threading.Event,
     received_traces: List[str],
 ) -> None:
     """Helper function to receive logs over a Unix domain socket.
@@ -43,8 +43,7 @@ def server_logging_thread(
 
     Args:
         socket_path: path to a Unix domain socket on which to listen for traces
-        server_ready: a threading.Condition used to signal to the caller that
-            this thread is ready to accept connections
+        server_ready: event set when the server is ready to accept connections
         received_traces: a list to which received traces will be appended (after
             decoding to a utf-8 string).
     """
@@ -53,8 +52,7 @@ def server_logging_thread(
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
         sock.bind(socket_path)
         sock.listen(0)
-        with server_ready:
-            server_ready.notify()
+        server_ready.set()
         with sock.accept()[0] as conn:
             while True:
                 recved = conn.recv(4096)
@@ -315,6 +313,7 @@ def test_data_event_config(event_log: git_trace2_event_log.EventLog) -> None:
         "repo.partialclone": "false",
         "repo.syncstate.superproject.hassuperprojecttag": "true",
         "repo.syncstate.superproject.sys.argv": ["--", "sync", "protobuf"],
+        "repo.syncstate.emptykey": "",
     }
     prefix_value = "prefix"
     event_log.LogDataConfigEvents(config, prefix_value)
@@ -323,7 +322,7 @@ def test_data_event_config(event_log: git_trace2_event_log.EventLog) -> None:
         log_path = event_log.Write(path=tempdir)
         log_data = read_log(log_path)
 
-    assert len(log_data) == 5
+    assert len(log_data) == 6
     data_events = log_data[1:]
     verify_common_keys(log_data[0], expected_event_name="version")
 
@@ -403,7 +402,7 @@ def test_write_socket(event_log: git_trace2_event_log.EventLog) -> None:
     received_traces: List[str] = []
     with tempfile.TemporaryDirectory(prefix="test_server_sockets") as tempdir:
         socket_path = os.path.join(tempdir, "server.sock")
-        server_ready = threading.Condition()
+        server_ready = threading.Event()
         # Start "server" listening on Unix domain socket at socket_path.
         server_thread = threading.Thread(
             target=server_logging_thread,
@@ -411,9 +410,7 @@ def test_write_socket(event_log: git_trace2_event_log.EventLog) -> None:
         )
         try:
             server_thread.start()
-
-            with server_ready:
-                server_ready.wait(timeout=120)
+            server_ready.wait(timeout=120)
 
             event_log.StartEvent([])
             path = event_log.Write(path=f"af_unix:{socket_path}")

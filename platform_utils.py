@@ -222,6 +222,43 @@ def rmdir(path):
     os.rmdir(_makelongpath(path))
 
 
+def removedirs(path: str) -> None:
+    """Remove a directory tree of symlinks and empty directories.
+
+    Walks |path| bottom-up without following symlinks.  Removes symlinks
+    and empty directories.  Stops at (and preserves) regular files and
+    non-empty directories.  Silently succeeds if |path| does not exist.
+
+    Availability: Unix, Windows.
+    """
+    if islink(path):
+        remove(path)
+        return
+
+    if not isdir(path):
+        return
+
+    for dirpath, dirnames, filenames in walk(path, topdown=False):
+        for name in dirnames:
+            entry = os.path.join(dirpath, name)
+            if islink(entry):
+                remove(entry)
+            else:
+                try:
+                    rmdir(entry)
+                except OSError:
+                    pass
+        for name in filenames:
+            entry = os.path.join(dirpath, name)
+            if islink(entry):
+                remove(entry)
+
+    try:
+        rmdir(path)
+    except OSError:
+        pass
+
+
 def isdir(path):
     """os.path.isdir(path) wrapper with support for long paths on Windows.
 

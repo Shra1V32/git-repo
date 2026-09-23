@@ -16,6 +16,7 @@ import multiprocessing
 import optparse
 import os
 import re
+from typing import List, Optional, TYPE_CHECKING
 
 from error import InvalidProjectGroupsError
 from error import NoSuchProjectError
@@ -23,6 +24,11 @@ from error import RepoExitError
 from event_log import EventLog
 
 import progress
+
+
+if TYPE_CHECKING:
+    from project import Project
+
 # Are we generating man-pages?
 GENERATE_MANPAGES = os.environ.get("_REPO_GENERATE_MANPAGES_") == " indeed! "
 # Number of projects to submit to a single worker process at a time.
@@ -51,6 +57,10 @@ class Command:
     # commonly use it or it's a more uncommon command. This is used by the help
     # command to show short-vs-full summaries.
     COMMON = False
+
+    # Whether this command should respect the smart sync override manifest if
+    # it exists.
+    RESPECT_SMART_SYNC_OVERRIDE = True
     # Whether this command supports running in parallel. If greater than 0,
     # it is the number of parallel jobs to default to.
     PARALLEL_JOBS = None
@@ -84,6 +94,11 @@ class Command:
         self._optparse = None
     def WantPager(self, _opt):
         return False
+
+    @staticmethod
+    def is_multiprocessing_active() -> bool:
+        """Whether the current process is a worker in a pool."""
+        return multiprocessing.current_process().name != "MainProcess"
     def ReadEnvironmentOptions(self, opts):
         """Set options from environment variables."""
         env_options = self._RegisteredEnvironmentOptions()
@@ -114,6 +129,20 @@ class Command:
             self._CommonOptions(self._optparse)
             self._Options(self._optparse)
         return self._optparse
+
+    @staticmethod
+    def _GetHelpForCpuJobCount(
+        default_jobs: Optional[int] = None,
+    ) -> str:
+        """Return CPU-based job help, with an explicit default when needed.
+
+        Specify default_jobs when additional logic computes effective default.
+        """
+        if GENERATE_MANPAGES:
+            return "based on number of CPU cores"
+
+        default = "%default" if default_jobs is None else str(default_jobs)
+        return f"{default}; based on number of CPU cores"
     def _CommonOptions(self, p, opt_v=True):
         """Initialize the option parser with common options.
         These will show up for *all* subcommands, so use sparingly.
@@ -138,6 +167,7 @@ class Command:
 
         # Allow specifying fewer jobs but always cap at 24
         if self.PARALLEL_JOBS is not None:
+            default = self._GetHelpForCpuJobCount()
             p.add_option(
                 "-j",
                 "--jobs",
@@ -212,6 +242,12 @@ class Command:
             # By default, treat multi-manifest instances as a single manifest
             # from the user's perspective.
             opt.outer_manifest = True
+
+        if self.RESPECT_SMART_SYNC_OVERRIDE:
+            if self.manifest:
+                self.TryOverrideManifestWithSmartSync(self.manifest)
+            if self.outer_manifest and self.outer_manifest != self.manifest:
+                self.TryOverrideManifestWithSmartSync(self.outer_manifest)
     def ValidateOptions(self, opt, args):
         """Validate the user options & arguments before executing.
         This is meant to help break the code up into logical steps. Some tips:
@@ -335,16 +371,22 @@ class Command:
         manifest=None,
         groups="",
         missing_ok=False,
-        submodules_ok=False,
+        submodules_ok=None,
         all_manifests=False,
     ):
         """A list of projects that match the arguments.
         Args:
             args: a list of (case-insensitive) strings, projects to search for.
             manifest: an XmlManifest, the manifest to use, or None for default.
-            groups: a string, the manifest groups in use.
+            groups: a string, the manifest group selection to apply.
+                Non-empty values apply to all candidate projects in this call.
+                When empty or omitted, single-manifest calls use the selected
+                manifest's effective groups; all-manifest calls use each
+                candidate project's owning manifest's effective groups.
             missing_ok: a boolean, whether to allow missing projects.
-            submodules_ok: a boolean, whether to allow submodules.
+            submodules_ok: whether to allow submodules. True allows them for
+                all projects, False disallows them for all projects, and None
+                defers to each project's sync-s setting.
             all_manifests: a boolean, if True then all manifests and
                 submanifests are used. If False, then only the local
                 (sub)manifest is used.
@@ -360,21 +402,50 @@ class Command:
                 manifest = self.manifest
             all_projects_list = manifest.projects
         result = []
-        if not groups:
-            groups = manifest.GetManifestGroupsStr()
-        groups = [x for x in re.split(r"[,\s]+", groups) if x]
+
+        def should_include_submodules(project: "Project") -> bool:
+            if submodules_ok is None:
+                return project.sync_s
+            return submodules_ok
+
+        def parse_groups(value: str) -> List[str]:
+            return [x for x in re.split(r"[,\s]+", value) if x]
+
+        if groups:
+            groups_for_all_projects = parse_groups(groups)
+        elif all_manifests:
+            # In all-manifest mode, each project uses its owning
+            # manifest's effective groups.
+            groups_for_all_projects = None
+        else:
+            groups_for_all_projects = parse_groups(
+                manifest.GetManifestGroupsStr()
+            )
+
+        groups_by_manifest = {}
+
+        def matches_groups(project: "Project") -> bool:
+            if groups_for_all_projects is not None:
+                return project.MatchesGroups(groups_for_all_projects)
+
+            project_manifest = project.manifest
+            if project_manifest not in groups_by_manifest:
+                groups_by_manifest[project_manifest] = parse_groups(
+                    project_manifest.GetManifestGroupsStr()
+                )
+
+            return project.MatchesGroups(groups_by_manifest[project_manifest])
         if not args:
             derived_projects = {}
             for project in all_projects_list:
-                if submodules_ok or project.sync_s:
+                if should_include_submodules(project):
                     derived_projects.update(
-                        (p.name, p) for p in project.GetDerivedSubprojects()
+                        (p.RelPath(local=False), p)
+                        for p in project.GetDerivedSubprojects()
                     )
             all_projects_list.extend(derived_projects.values())
             for project in all_projects_list:
-                if (missing_ok or project.Exists) and project.MatchesGroups(
-                    groups
-                ):
+                if (missing_ok or project.Exists) and matches_groups(project):
                     result.append(project)
         else:
             self._ResetPathToProjectMap(all_projects_list)
@@ -387,7 +458,7 @@ class Command:
                     for project in manifest.GetProjectsWithName(
                         arg, all_manifests=all_manifests
                     )
-                    if project.MatchesGroups(groups)
+                    if matches_groups(project)
                 ]
                 if not projects:
                     path = os.path.abspath(arg).replace("\\", "/")
@@ -404,7 +475,7 @@ class Command:
                     if (
                         project
                         and not project.Derived
-                        and (submodules_ok or project.sync_s)
+                        and should_include_submodules(project)
                     ):
                         search_again = False
                         for subproject in project.GetDerivedSubprojects():
@@ -425,14 +496,22 @@ class Command:
                             "%s (%s)"
                             % (arg, project.RelPath(local=not all_manifests))
                         )
-                    if not project.MatchesGroups(groups):
+                    if not matches_groups(project):
                         raise InvalidProjectGroupsError(arg)
                 result.extend(projects)
         def _getpath(x):
             return x.relpath
         result.sort(key=_getpath)
         return result
-    def FindProjects(self, args, inverse=False, all_manifests=False):
+
+    def FindProjects(
+        self,
+        args: List[str],
+        inverse: bool = False,
+        all_manifests: bool = False,
+        groups: Optional[str] = "",
+        missing_ok: Optional[bool] = False,
+    ) -> List["Project"]:
         """Find projects from command line arguments.
         Args:
             args: a list of (case-insensitive) strings, projects to search for.
@@ -441,10 +520,18 @@ class Command:
             all_manifests: a boolean, if True then all manifests and
                 submanifests are used. If False, then only the local
                 (sub)manifest is used.
+            groups: a string specifying manifest groups. If empty or None, use
+                each manifest's effective groups.
+            missing_ok: a boolean, whether to allow missing projects.
         """
         result = []
         patterns = [re.compile(r"%s" % a, re.IGNORECASE) for a in args]
-        for project in self.GetProjects("", all_manifests=all_manifests):
+        for project in self.GetProjects(
+            "",
+            groups=groups,
+            missing_ok=missing_ok,
+            all_manifests=all_manifests,
+        ):
             paths = [project.name, project.RelPath(local=not all_manifests)]
             for pattern in patterns:
                 match = any(pattern.search(x) for x in paths)
@@ -460,6 +547,22 @@ class Command:
             key=lambda project: (project.manifest.path_prefix, project.relpath)
         )
         return result
+
+    def GetSmartSyncOverridePath(self, manifest=None) -> str:
+        """Return the path where smart sync writes its override manifest."""
+        if manifest is None:
+            manifest = self.manifest
+        return os.path.join(
+            manifest.manifestProject.worktree, "smart_sync_override.xml"
+        )
+
+    def TryOverrideManifestWithSmartSync(self, manifest=None) -> None:
+        """Override manifest with smart_sync_override.xml if it exists."""
+        if manifest is None:
+            manifest = self.manifest
+        smart_sync_manifest_path = self.GetSmartSyncOverridePath(manifest)
+        if os.path.isfile(smart_sync_manifest_path):
+            manifest.Override(smart_sync_manifest_path)
     def ManifestList(self, opt):
         """Yields all of the manifests to traverse.
         Args:

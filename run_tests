@@ -157,11 +157,6 @@ def run_check_metadata():
 
 def run_update_manpages() -> int:
     """Returns the exit code from release/update-manpages."""
-    # Allow this to fail on CI, but not local devs.
-    if is_ci() and not shutil.which("help2man"):
-        print("update-manpages: help2man not found; skipping test")
-        return 0
-
     argv = ["--check"]
     log_cmd("release/update-manpages", argv)
     return subprocess.run(
@@ -171,8 +166,24 @@ def run_update_manpages() -> int:
     ).returncode
 
 
+def cipd_bootstrap() -> None:
+    """Install packages via cipd if available."""
+    argv = ["ensure", "-root", ".cipd_bin", "-ensure-file", "cipd_manifest.txt"]
+    log_cmd("cipd", argv)
+    try:
+        subprocess.run(
+            ["cipd"] + argv,
+            check=True,
+            cwd=ROOT_DIR,
+        )
+    except FileNotFoundError:
+        # Skip if the user doesn't have cipd from depot_tools.
+        return
+
+
 def main(argv):
     """The main entry."""
+    cipd_bootstrap()
     checks = (
         functools.partial(run_pytest, argv),
         functools.partial(run_pytest_py38, argv),

@@ -24,7 +24,7 @@ However there are some differences, so please review and familiarize
 yourself with the following relevant bits.
 
 
-## Make separate commits for logically separate changes.
+## Make separate commits for logically separate changes
 
 Unless your patch is really trivial, you should not be sending out a patch that
 was generated between your working tree and your commit head.
@@ -118,7 +118,7 @@ your patch.  It is virtually impossible to remove a patch once it
 has been applied and pushed out.
 
 
-## Sending your patches.
+## Sending your patches
 
 Do not email your patches to anyone.
 

@@ -145,7 +145,7 @@ You will have to specify this flag every time you upload.
 
 [mintty]: https://github.com/mintty/mintty/issues/56
 
-### repohooks always fail with an close_fds error.
+### repohooks always fail with an close_fds error
 
 When using the [reference repohooks project][repohooks] included in AOSP,
 you might see errors like this when running `repo upload`:

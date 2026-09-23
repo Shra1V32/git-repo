@@ -25,7 +25,6 @@ from color import Coloring
 from command import Command
 from command import DEFAULT_LOCAL_JOBS
 from command import MirrorSafeCommand
-from error import ManifestInvalidRevisionError
 from repo_logging import RepoLogger
 
 
@@ -101,6 +100,14 @@ revision to a locally executed git command, use REPO_LREV.
 
 REPO_RREV is the name of the revision from the manifest, exactly
 as written in the manifest.
+
+REPO_UPSTREAM is the name of the upstream branch as specified in the
+manifest.
+
+REPO_DEST_BRANCH is the name of the destination branch for code review,
+as specified in the manifest.
+
+REPO_PROJECT_FETCH_URL is the full resolved fetch URL for the project.
 
 REPO_COUNT is the total number of projects being iterated.
 
@@ -236,19 +243,15 @@ without iterating through the remaining projects.
 
         mirror = self.manifest.IsMirror
 
-        smart_sync_manifest_name = "smart_sync_override.xml"
-        smart_sync_manifest_path = os.path.join(
-            self.manifest.manifestProject.worktree, smart_sync_manifest_name
-        )
-
-        if os.path.isfile(smart_sync_manifest_path):
-            self.manifest.Override(smart_sync_manifest_path)
-
         if opt.regex:
-            projects = self.FindProjects(args, all_manifests=all_trees)
+            projects = self.FindProjects(
+                args,
+                groups=opt.groups,
+                all_manifests=all_trees,
+            )
         elif opt.inverse_regex:
             projects = self.FindProjects(
-                args, inverse=True, all_manifests=all_trees
+                args, inverse=True, groups=opt.groups, all_manifests=all_trees
             )
         else:
             projects = self.GetProjects(
@@ -339,25 +342,8 @@ def DoWork(project, mirror, opt, cmd, shell, cnt, config):
             val = ""
         env[name] = val
 
-    setenv("REPO_PROJECT", project.name)
-    setenv("REPO_OUTERPATH", project.manifest.path_prefix)
-    setenv("REPO_INNERPATH", project.relpath)
-    setenv("REPO_PATH", project.RelPath(local=opt.this_manifest_only))
-    setenv("REPO_REMOTE", project.remote.name)
-    try:
-        # If we aren't in a fully synced state and we don't have the ref the
-        # manifest wants, then this will fail.  Ignore it for the purposes of
-        # this code.
-        lrev = "" if mirror else project.GetRevisionId()
-    except ManifestInvalidRevisionError:
-        lrev = ""
-    setenv("REPO_LREV", lrev)
-    setenv("REPO_RREV", project.revisionExpr)
-    setenv("REPO_UPSTREAM", project.upstream)
-    setenv("REPO_DEST_BRANCH", project.dest_branch)
-    setenv("REPO_I", str(cnt + 1))
-    for annotation in project.annotations:
-        setenv("REPO__%s" % (annotation.name), annotation.value)
+    env.update(project.GetEnvVars(local=opt.this_manifest_only))
+    env["REPO_I"] = str(cnt + 1)
 
     if mirror:
         setenv("GIT_DIR", project.gitdir)

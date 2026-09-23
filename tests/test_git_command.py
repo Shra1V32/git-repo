@@ -123,6 +123,7 @@ class GitCommandStreamLogsTest(unittest.TestCase):
     """Tests the GitCommand class stderr log streaming cases."""
 
     def setUp(self):
+        _ = git_command.user_agent.git
         self.mock_process = mock.MagicMock()
         self.mock_process.communicate.return_value = (None, None)
         self.mock_process.wait.return_value = 0
@@ -228,8 +229,161 @@ class GitCommandStreamLogsTest(unittest.TestCase):
         self.assertEqual(cmd.stderr, logs)
 
 
+class GitCommandCaptureBytesTest(unittest.TestCase):
+    """Tests the GitCommand class byte capture cases."""
+
+    def setUp(self) -> None:
+        _ = git_command.user_agent.git
+        self.mock_process = mock.MagicMock()
+        self.mock_process.communicate.return_value = (None, None)
+        self.mock_process.wait.return_value = 0
+
+        self.mock_popen = mock.MagicMock()
+        self.mock_popen.return_value = self.mock_process
+        mock.patch("subprocess.Popen", self.mock_popen).start()
+
+    def tearDown(self) -> None:
+        mock.patch.stopall()
+
+    def test_captures_stdout_as_bytes(self) -> None:
+        self.mock_process.communicate.return_value = (b"\xff\x00", b"error\r\n")
+
+        cmd = git_command.GitCommand(
+            None,
+            ["status"],
+            capture_stdout=True,
+            capture_stdout_bytes=True,
+            capture_stderr=True,
+        )
+
+        self.mock_popen.assert_called_once_with(
+            ["git", "status"],
+            cwd=None,
+            env=mock.ANY,
+            stdin=None,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertEqual(cmd.stdout, b"\xff\x00")
+        self.assertEqual(cmd.stderr, "error\n")
+
+    def test_capture_stdout_bytes_auto_enables_capture_stdout(self) -> None:
+        self.mock_process.communicate.return_value = (b"output", b"")
+
+        cmd = git_command.GitCommand(
+            None,
+            ["status"],
+            capture_stdout_bytes=True,
+        )
+
+        self.mock_popen.assert_called_once_with(
+            ["git", "status"],
+            cwd=None,
+            env=mock.ANY,
+            stdin=None,
+            stdout=subprocess.PIPE,
+            stderr=None,
+        )
+        self.assertEqual(cmd.stdout, b"output")
+
+    def test_capture_stdout_bytes_with_merge_output_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            git_command.GitCommand(
+                None,
+                ["status"],
+                capture_stdout_bytes=True,
+                merge_output=True,
+            )
+
+    def test_captures_stdout_as_bytes_encodes_str_input(self) -> None:
+        self.mock_process.communicate.return_value = (b"output", b"")
+
+        git_command.GitCommand(
+            None,
+            ["status"],
+            input="hello world",
+            capture_stdout_bytes=True,
+        )
+
+        self.mock_process.communicate.assert_called_once_with(
+            input=b"hello world"
+        )
+
+    def test_captures_stdout_as_bytes_encodes_surrogate_input(self) -> None:
+        self.mock_process.communicate.return_value = (b"output", b"")
+
+        git_command.GitCommand(
+            None,
+            ["status"],
+            input="file_\udcff.txt",
+            capture_stdout_bytes=True,
+        )
+
+        self.mock_process.communicate.assert_called_once_with(
+            input=b"file_\xff.txt"
+        )
+
+    def test_captures_stdout_as_bytes_passes_bytes_input(self) -> None:
+        self.mock_process.communicate.return_value = (b"output", b"")
+
+        git_command.GitCommand(
+            None,
+            ["status"],
+            input=b"raw_\xff.txt",
+            capture_stdout_bytes=True,
+        )
+
+        self.mock_process.communicate.assert_called_once_with(
+            input=b"raw_\xff.txt"
+        )
+
+    def test_verify_command_truncates_nul_delimited_stdout(self) -> None:
+        cmd = git_command.GitCommand(
+            None,
+            ["status"],
+            capture_stdout_bytes=True,
+        )
+        cmd.rc = 1
+        cmd.stdout = b"first_file\0second_file\0third_file"
+        cmd.stderr = "stderr"
+        with self.assertRaises(git_command.GitCommandError) as cm:
+            cmd.VerifyCommand()
+        self.assertEqual(cm.exception.git_stdout, "first_file")
+
+    def test_verify_command_decodes_bytes_stdout(self) -> None:
+        cmd = git_command.GitCommand(
+            None,
+            ["status"],
+            capture_stdout_bytes=True,
+        )
+        cmd.rc = 1
+        cmd.stdout = b"error\xff\nline2"
+        cmd.stderr = "stderr"
+        with self.assertRaises(git_command.GitCommandError) as cm:
+            cmd.VerifyCommand()
+        self.assertEqual(cm.exception.git_stdout, "error\\xff")
+
+
 class GitCallUnitTest(unittest.TestCase):
     """Tests the _GitCall class (via git_command.git)."""
+
+    def test_valid_branch_name_uses_branch_mode(self) -> None:
+        """Branch validation applies Git's branch-specific restrictions."""
+        command = mock.MagicMock()
+        command.Wait.return_value = 1
+        with mock.patch.object(
+            git_command, "GitCommand", return_value=command
+        ) as check:
+            self.assertFalse(git_command.IsValidBranchName("-topic"))
+
+        check.assert_called_once_with(
+            None,
+            ["check-ref-format", "--branch", "-topic"],
+            capture_stdout=True,
+            capture_stderr=True,
+            add_event_log=False,
+            log_as_error=False,
+        )
 
     def test_version_tuple(self):
         """Check git.version_tuple() handling."""

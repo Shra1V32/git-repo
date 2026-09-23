@@ -16,7 +16,9 @@ import sys
 
 from color import Coloring
 from command import Command
+from error import GitError
 from git_command import GitCommand
+from project import Project
 from repo_logging import RepoLogger
 
 
@@ -28,6 +30,17 @@ class RebaseColoring(Coloring):
         Coloring.__init__(self, config, "rebase")
         self.project = self.printer("project", attr="bold")
         self.fail = self.printer("fail", fg="red")
+
+
+def _ResolveOntoManifest(project: Project) -> str:
+    """Resolve project's revisionExpr to a local tracking branch.
+
+    Falls back to the raw revisionExpr if ToLocal fails or raises GitError.
+    """
+    try:
+        return project.GetRemote().ToLocal(project.revisionExpr)
+    except GitError:
+        return project.revisionExpr
 
 
 class Rebase(Command):
@@ -126,6 +139,8 @@ branch but need to incorporate new upstream changes "underneath" them.
             common_args.append("--autosquash")
         if opt.interactive:
             common_args.append("-i")
+        if opt.auto_stash:
+            common_args.append("--autostash")
 
         config = self.manifest.manifestProject.config
         out = RebaseColoring(config)
@@ -162,7 +177,7 @@ branch but need to incorporate new upstream changes "underneath" them.
             args = common_args[:]
             if opt.onto_manifest:
                 args.append("--onto")
-                args.append(project.revisionExpr)
+                args.append(_ResolveOntoManifest(project))
 
             args.append(upbranch.LocalMerge)
 
@@ -175,28 +190,9 @@ branch but need to incorporate new upstream changes "underneath" them.
             out.nl()
             out.flush()
 
-            needs_stash = False
-            if opt.auto_stash:
-                stash_args = ["update-index", "--refresh", "-q"]
-
-                if GitCommand(project, stash_args).Wait() != 0:
-                    needs_stash = True
-                    # Dirty index, requires stash...
-                    stash_args = ["stash"]
-
-                    if GitCommand(project, stash_args).Wait() != 0:
-                        ret += 1
-                        continue
-
             if GitCommand(project, args).Wait() != 0:
                 ret += 1
                 continue
-
-            if needs_stash:
-                stash_args.append("pop")
-                stash_args.append("--quiet")
-                if GitCommand(project, stash_args).Wait() != 0:
-                    ret += 1
 
         if ret:
             msg_fmt = "%d projects had errors"

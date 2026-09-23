@@ -129,7 +129,7 @@ if not REPO_REV:
 BUG_URL = "https://issues.gerritcodereview.com/issues/new?component=1370071"
 
 # increment this whenever we make important changes to this script
-VERSION = (2, 54)
+VERSION = (2, 65)
 
 # increment this if the MAINTAINER_KEYS block is modified
 KEYRING_VERSION = (2, 3)
@@ -379,6 +379,11 @@ def InitParser(parser):
         action="store_true",
         help="use git-worktree to manage projects",
     )
+    group.add_option(
+        "--use-local-gitdirs",
+        action="store_true",
+        help="bypass .repo/projects/ and use standard Git layout in working tree",
+    )
 
     # These are fundamentally different ways of structuring the checkout.
     group = parser.add_option_group("Project checkout optimizations")
@@ -408,20 +413,20 @@ def InitParser(parser):
         "--partial-clone",
         action="store_true",
         help="perform partial clone (https://git-scm.com/"
-        "docs/gitrepository-layout#_code_partialclone_code)",
+        "docs/partial-clone)",
     )
     group.add_option(
         "--no-partial-clone",
         action="store_false",
         help="disable use of partial clone (https://git-scm.com/"
-        "docs/gitrepository-layout#_code_partialclone_code)",
+        "docs/partial-clone)",
     )
     group.add_option(
         "--partial-clone-exclude",
         action="store",
         help="exclude the specified projects (a comma-delimited "
         "project names) from partial clone (https://git-scm.com"
-        "/docs/gitrepository-layout#_code_partialclone_code)",
+        "/docs/partial-clone)",
     )
     group.add_option(
         "--clone-filter",
@@ -748,6 +753,28 @@ def SetGitTrace2ParentSid(env=None):
         value = env[KEY] + "/" + value
 
     _setenv(KEY, value, env=env)
+
+
+def _NormalizeGpgHomePath(path: str) -> str:
+    """Convert path for GPG on Windows if running in MSYS/MinGW.
+
+    If GPG is MSYS-based (common in Git Bash/Cygwin), it expects POSIX-like paths
+    (e.g. /c/Users/... instead of C:\\Users\\...). Native Windows Python uses
+    Windows-style paths, which MSYS GPG will incorrectly treat as relative paths.
+    We use cygpath to query the active MSYS/Cygwin mount configuration and resolve
+    the correct POSIX path.
+    """
+    if platform.system() == "Windows":
+        try:
+            out = subprocess.check_output(
+                ["cygpath", "-u", path],
+                stderr=subprocess.DEVNULL,
+                universal_newlines=True,
+            )
+            return out.strip()
+        except (OSError, subprocess.CalledProcessError):
+            pass
+    return path
 
 
 def _setenv(key, value, env=None):
@@ -1082,7 +1109,7 @@ def verify_rev(cwd, remote_ref, rev, quiet):
             print(file=sys.stderr)
 
     env = os.environ.copy()
-    _setenv("GNUPGHOME", gpg_dir, env)
+    _setenv("GNUPGHOME", _NormalizeGpgHomePath(gpg_dir), env)
     run_git("tag", "-v", cur, cwd=cwd, env=env)
     return "%s^0" % cur
 

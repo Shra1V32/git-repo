@@ -40,7 +40,7 @@ from repo_trace import Trace
 # that is saved in the config.
 SYNC_STATE_PREFIX = "repo.syncstate."
 
-ID_RE = re.compile(r"^[0-9a-f]{40}$")
+ID_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 
 REVIEW_CACHE = {}
 
@@ -49,8 +49,8 @@ def IsChange(rev):
     return rev.startswith(R_CHANGES)
 
 
-def IsId(rev):
-    return ID_RE.match(rev)
+def IsId(rev: str) -> bool:
+    return bool(ID_RE.match(rev))
 
 
 def IsTag(rev):
@@ -438,7 +438,7 @@ class GitConfig:
         if p.Wait() == 0:
             return p.stdout
         else:
-            raise GitError(f"git config {str(args)}: {p.stderr}")
+            raise GitError(f"git {' '.join(command)}: {p.stderr}")
 
 
 class RepoConfig(GitConfig):
@@ -724,7 +724,10 @@ class Remote:
     def Save(self):
         """Save this remote to the configuration."""
         self._Set("url", self.url)
-        if self.pushUrl is not None:
+        # projectname is initialized for projects listed in the manifest, but
+        # not for others (e.g. the manifest project). This class is used for
+        # all of them.
+        if self.pushUrl is not None and self.projectname is not None:
             self._Set("pushurl", self.pushUrl + "/" + self.projectname)
         else:
             self._Set("pushurl", self.pushUrl)

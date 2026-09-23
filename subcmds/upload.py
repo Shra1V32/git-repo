@@ -25,7 +25,6 @@ from editor import Editor
 from error import GitError
 from error import SilentRepoExitError
 from error import UploadError
-from git_command import GitCommand
 from git_refs import R_HEADS
 import git_superproject
 from hooks import RepoHook
@@ -379,7 +378,7 @@ Gerrit Code Review:  https://www.gerritcodereview.com/
             default=True,
             help="disable verifying ssl certs (unsafe)",
         )
-        RepoHook.AddOptionGroup(p, "pre-upload")
+        RepoHook.AddOptionGroup(p, "pre-upload", allow_fix=True)
 
     def _SingleBranch(self, opt, branch, people):
         project = branch.project
@@ -436,6 +435,18 @@ Gerrit Code Review:  https://www.gerritcodereview.com/
         self._UploadAndReport(opt, [branch], people)
 
     def _MultipleBranches(self, opt, pending, people):
+        if opt.yes and (opt.current_branch or opt.branch):
+            todo = [
+                branch
+                for _, avail in pending
+                for branch in avail
+                if branch is not None
+            ]
+            if not todo:
+                _die("nothing ready for upload")
+            self._UploadAndReport(opt, todo, people)
+            return
+
         projects = {}
         branches = {}
 
@@ -649,6 +660,7 @@ Gerrit Code Review:  https://www.gerritcodereview.com/
             validate_certs=opt.validate_certs,
             push_options=push_options,
             patchset_description=opt.patchset_description,
+            git_event_log=self.git_event_log,
         )
 
         branch.uploaded = True
@@ -704,36 +716,31 @@ Gerrit Code Review:  https://www.gerritcodereview.com/
             raise UploadExitError(aggregate_errors=aggregate_errors)
 
     def _GetMergeBranch(self, project, local_branch=None):
+        """Get the merge branch name for a local branch.
+
+        Resolves the merge branch in-memory via project configuration to
+        avoid git subprocess overhead during upload.
+        """
         if local_branch is None:
-            p = GitCommand(
-                project,
-                ["rev-parse", "--abbrev-ref", "HEAD"],
-                capture_stdout=True,
-                capture_stderr=True,
-            )
-            p.Wait()
-            local_branch = p.stdout.strip()
-        p = GitCommand(
-            project,
-            ["config", "--get", "branch.%s.merge" % local_branch],
-            capture_stdout=True,
-            capture_stderr=True,
-        )
-        p.Wait()
-        merge_branch = p.stdout.strip()
-        return merge_branch
+            local_branch = project.CurrentBranch
+        if local_branch:
+            branch = project.GetBranch(local_branch)
+            if branch.merge:
+                return branch.merge
+        return ""
 
     @classmethod
     def _GatherOne(cls, opt, project_idx):
         """Figure out the upload status for |project|."""
         project = cls.get_parallel_context()["projects"][project_idx]
+        cbr = None
         if opt.current_branch:
             cbr = project.CurrentBranch
             up_branch = project.GetUploadableBranch(cbr)
             avail = [up_branch] if up_branch else None
         else:
             avail = project.GetUploadableBranches(opt.branch)
-        return (project_idx, avail)
+        return (project_idx, avail, cbr)
 
     def Execute(self, opt, args):
         projects = self.GetProjects(
@@ -743,7 +750,7 @@ Gerrit Code Review:  https://www.gerritcodereview.com/
         def _ProcessResults(_pool, _out, results):
             pending = []
             for result in results:
-                project_idx, avail = result
+                project_idx, avail, current_branch = result
                 project = projects[project_idx]
                 if avail is None:
                     logger.error(
@@ -751,7 +758,7 @@ Gerrit Code Review:  https://www.gerritcodereview.com/
                         "You might be able to fix the branch by running:\n"
                         "  git branch --set-upstream-to m/%s",
                         project.RelPath(local=opt.this_manifest_only),
-                        project.CurrentBranch,
+                        current_branch,
                         project.manifest.branch,
                     )
                 elif avail:

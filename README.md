@@ -49,6 +49,43 @@ $ curl https://storage.googleapis.com/git-repo-downloads/repo > ~/.bin/repo
 $ chmod a+rx ~/.bin/repo
 ```
 
+## Shell Completion
+
+Repo includes completion scripts for Bash and Zsh.
+
+### Bash
+
+To enable completion in Bash, source `completion.bash` in your `~/.bashrc`:
+
+```sh
+source /path/to/git-repo/completion.bash
+```
+
+### Zsh
+
+To enable completion in Zsh, you can either:
+
+1.  Copy or symlink `completion.zsh` to a file named `_repo` in a directory in your `$fpath`:
+    ```sh
+    mkdir -p ~/.zsh/completion
+    # You can copy the file:
+    cp /path/to/git-repo/completion.zsh ~/.zsh/completion/_repo
+    # Or symlink it:
+    ln -s /path/to/git-repo/completion.zsh ~/.zsh/completion/_repo
+    ```
+    Then add that directory to your `fpath` in `~/.zshrc` before `compinit`:
+    ```zsh
+    fpath=(~/.zsh/completion $fpath)
+    autoload -Uz compinit
+    compinit
+    ```
+
+2.  Or source the file directly and call `compdef` in your `~/.zshrc`:
+    ```zsh
+    source /path/to/git-repo/completion.zsh
+    compdef _repo repo
+    ```
+
 
 [new-bug]: https://issues.gerritcodereview.com/issues/new?component=1370071
 [issue tracker]: https://issues.gerritcodereview.com/issues?q=is:open%20componentid:1370071

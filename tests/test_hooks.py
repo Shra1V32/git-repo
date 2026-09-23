@@ -14,6 +14,10 @@
 
 """Unittests for the hooks.py module."""
 
+from io import StringIO
+from pathlib import Path
+import sys
+
 import pytest
 
 import hooks
@@ -58,3 +62,142 @@ def test_direct_interp(shebang: str, interp: str) -> None:
 def test_env_interp(shebang: str, interp: str) -> None:
     """Lines whose shebang launches through `env`."""
     assert hooks.RepoHook._ExtractInterpFromShebang(shebang) == interp
+
+
+def test_post_sync_argument_validation() -> None:
+    """Test that post-sync hook requires exact API arguments."""
+
+    class FakeProject:
+
+        def __init__(self):
+            self.worktree = "/some/path"
+            self.enabled_repo_hooks = ["post-sync"]
+
+    hook = hooks.RepoHook(
+        hook_type="post-sync",
+        hooks_project=FakeProject(),
+        repo_topdir="/topdir",
+        manifest_url="https://gerrit",
+        allow_all_hooks=True,
+    )
+
+    old_stderr = sys.stderr
+    sys.stderr = StringIO()
+
+    try:
+        # Call with missing arg `sync_duration_seconds`
+        res = hook.Run(repo_topdir="/topdir")
+        assert res is False
+        assert "hook 'post-sync' called incorrectly" in sys.stderr.getvalue()
+
+        # Mock _CheckHook and _ExecuteHook to test success path
+        hook._CheckHook = lambda: None
+
+        executed_kwargs = {}
+
+        def fake_execute(**kw):
+            executed_kwargs.update(kw)
+
+        hook._ExecuteHook = fake_execute
+
+        res = hook.Run(repo_topdir="/topdir", sync_duration_seconds=12.345)
+        assert res is True
+        assert executed_kwargs.get("sync_duration_seconds") == 12.345
+
+    finally:
+        sys.stderr = old_stderr
+
+
+@pytest.mark.parametrize("yes_val", (True, False))
+def test_repo_upload_yes_arg(tmp_path: Path, yes_val: bool) -> None:
+    """Test that yes is passed in kwargs during hook execution."""
+
+    class FakeProject:
+        def __init__(self, worktree: str) -> None:
+            self.worktree = worktree
+            self.enabled_repo_hooks = ["pre-upload"]
+            self.config = None
+
+    hook_file = tmp_path / "pre-upload.py"
+
+    hook_content = """
+def main(project_list, **kwargs):
+    project_list.append(kwargs.get("yes"))
+"""
+    hook_file.write_text(hook_content)
+
+    hook = hooks.RepoHook(
+        hook_type="pre-upload",
+        hooks_project=FakeProject(str(tmp_path)),
+        repo_topdir=str(tmp_path),
+        manifest_url="https://gerrit",
+        allow_all_hooks=True,
+        yes=yes_val,
+    )
+
+    project_list = []
+    res = hook.Run(project_list=project_list, worktree_list=[])
+
+    assert res is True
+    assert project_list == [yes_val]
+
+
+@pytest.mark.parametrize("fix_val", (True, False))
+def test_repo_upload_fix_arg(tmp_path: Path, fix_val: bool) -> None:
+    """Test that fix is passed in kwargs during hook execution."""
+
+    class FakeProject:
+        def __init__(self, worktree: str) -> None:
+            self.worktree = worktree
+            self.enabled_repo_hooks = ["pre-upload"]
+            self.config = None
+
+    hook_file = tmp_path / "pre-upload.py"
+
+    hook_content = """
+def main(project_list, **kwargs):
+    project_list.append(kwargs.get("fix"))
+"""
+    hook_file.write_text(hook_content)
+
+    hook = hooks.RepoHook(
+        hook_type="pre-upload",
+        hooks_project=FakeProject(str(tmp_path)),
+        repo_topdir=str(tmp_path),
+        manifest_url="https://gerrit",
+        allow_all_hooks=True,
+        fix=fix_val,
+    )
+
+    project_list = []
+    res = hook.Run(project_list=project_list, worktree_list=[])
+
+    assert res is True
+    assert project_list == [fix_val]
+
+
+def test_from_subcmd_without_fix_option() -> None:
+    """Test that FromSubcmd works when opt does not have fix attribute."""
+
+    class Remote:
+        url = "https://gerrit"
+
+    class FakeManifest:
+        repo_hooks_project = None
+        topdir = "/fake/topdir"
+
+        class manifestProject:
+            @staticmethod
+            def GetRemote(name: str) -> "Remote":
+                return Remote()
+
+        class contactinfo:
+            bugurl = "https://bugs"
+
+    class FakeOpt:
+        bypass_hooks = False
+        allow_all_hooks = False
+        ignore_hooks = False
+
+    hook = hooks.RepoHook.FromSubcmd(FakeManifest(), FakeOpt(), "post-sync")
+    assert hook._fix is False

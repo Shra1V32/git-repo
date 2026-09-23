@@ -15,6 +15,7 @@
 import datetime
 import errno
 import filecmp
+import functools
 import glob
 import os
 import platform
@@ -28,10 +29,25 @@ import sys
 import tarfile
 import tempfile
 import time
-from typing import List, NamedTuple, Optional
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 import urllib.parse
 
 import fetch
+from git_command import git_require
+from git_command import GitCommand
+from git_command import GitCommandError
+from git_config import GetSchemeFromUrl
+from git_config import GetUrlCookieFile
+from git_config import GitConfig
+from git_config import IsId
+from git_refs import GitRefs
+from git_refs import HEAD
+from git_refs import R_HEADS
+from git_refs import R_M
+from git_refs import R_PUB
+from git_refs import R_TAGS
+from git_refs import R_WORKTREE_M
+import git_status
 import git_superproject
 import platform_utils
 import progress
@@ -47,9 +63,6 @@ from error import (
     RepoError,
     UploadError,
 )
-from git_command import GitCommand, git_require
-from git_config import GetSchemeFromUrl, GetUrlCookieFile, GitConfig, IsId
-from git_refs import HEAD, R_HEADS, R_M, R_PUB, R_TAGS, R_WORKTREE_M, GitRefs
 from git_trace2_event_log import EventLog
 from repo_logging import RepoLogger
 from repo_trace import Trace
@@ -97,6 +110,14 @@ RETRY_JITTER_PERCENT = 0.1
 # Whether to use alternates.  Switching back and forth is *NOT* supported.
 # TODO(vapier): Remove knob once behavior is verified.
 _ALTERNATES = os.environ.get("REPO_USE_ALTERNATES") == "1"
+
+
+def _FirstLines(lines: List[str], limit: int = 10) -> str:
+    """Join |lines|, eliding all but the first |limit| of them."""
+    shown = list(lines[:limit])
+    if len(lines) > limit:
+        shown.append(f"... and {len(lines) - limit} more")
+    return "\n".join(shown)
 
 
 def _lwrite(path, content):
@@ -186,6 +207,10 @@ class ReviewableBranch:
         return self.branch.name
 
     @property
+    def current(self) -> bool:
+        return getattr(self.branch, "current", False)
+
+    @property
     def commits(self):
         if self._commit_cache is None:
             args = (
@@ -230,6 +255,12 @@ class ReviewableBranch:
         )
 
     @property
+    def modified_files(self) -> List[str]:
+        return self.project.bare_git.diff(
+            "--name-only", f"{self.base}...{R_HEADS}{self.name}"
+        ).splitlines()
+
+    @property
     def base_exists(self):
         """Whether the branch we're tracking exists.
 
@@ -261,7 +292,8 @@ class ReviewableBranch:
         validate_certs=True,
         push_options=None,
         patchset_description=None,
-    ):
+        git_event_log: Optional[EventLog] = None,
+    ) -> None:
         self.project.UploadForReview(
             branch=self.name,
             people=people,
@@ -277,6 +309,7 @@ class ReviewableBranch:
             validate_certs=validate_certs,
             push_options=push_options,
             patchset_description=patchset_description,
+            git_event_log=git_event_log,
         )
 
     def GetPublishedRefs(self):
@@ -444,9 +477,13 @@ class _LinkFile(NamedTuple):
             platform_utils.readlink(absDest) != relSrc
         ):
             try:
-                # Remove existing file first, since it might be read-only.
+                # Remove existing path first, since it might be read-only.
                 if os.path.lexists(absDest):
-                    platform_utils.remove(absDest)
+                    # removedirs handles symlinks, empty dirs, and nested
+                    # trees of stale linkfile dests without deleting user
+                    # content.  Falls through to symlink() if the path was
+                    # fully removed, or raises OSError if not.
+                    platform_utils.removedirs(absDest)
                 else:
                     dest_dir = os.path.dirname(absDest)
                     if not platform_utils.isdir(dest_dir):
@@ -554,6 +591,7 @@ class Project:
         parent=None,
         use_git_worktrees=False,
         is_derived=False,
+        gitlink_path: Optional[str] = None,
         dest_branch=None,
         optimized_fetch=False,
         retry_fetches=0,
@@ -583,6 +621,8 @@ class Project:
             use_git_worktrees: Whether to use `git worktree` for this project.
             is_derived: False if the project was explicitly defined in the
                 manifest; True if the project is a discovered submodule.
+            gitlink_path: For a discovered submodule, its path inside the
+                parent project.
             dest_branch: The branch to which to push changes for review by
                 default.
             optimized_fetch: If True, when a project is set to a sha1 revision,
@@ -610,6 +650,7 @@ class Project:
         # See the XmlManifest init code for more info.
         self.use_git_worktrees = use_git_worktrees
         self.is_derived = is_derived
+        self.gitlink_path = gitlink_path
         self.optimized_fetch = optimized_fetch
         self.retry_fetches = max(0, retry_fetches)
         self.subprojects = []
@@ -637,6 +678,51 @@ class Project:
         if local:
             return self.relpath
         return os.path.join(self.manifest.path_prefix, self.relpath)
+
+    def GetEnvVars(self, local: bool = True) -> Dict[str, str]:
+        """Get project-context environment variables.
+
+        Args:
+            local: If True, REPO_PATH is relative to the local (sub)manifest.
+                If False, it is relative to the outermost manifest.
+
+        Returns:
+            A dictionary mapping environment variable names to their values.
+
+        Environment Variables:
+            See the Environment section in `repo help forall` or
+            `subcmds/forall.py` for details on the available variables.
+            Note that `forall.py` also documents some extra variables that are
+            specific to how the `repo forall` command iterates over projects
+            (e.g., `REPO_COUNT` and `REPO_I`).
+        """
+        env = {}
+
+        def setenv(name, val):
+            if val is None:
+                val = ""
+            env[name] = val
+
+        setenv("REPO_PROJECT", self.name)
+        setenv("REPO_OUTERPATH", self.manifest.path_prefix)
+        setenv("REPO_INNERPATH", self.relpath)
+        setenv("REPO_PATH", self.RelPath(local=local))
+        setenv("REPO_REMOTE", self.remote.name)
+        setenv("REPO_PROJECT_FETCH_URL", self.remote.url)
+
+        try:
+            lrev = "" if self.manifest.IsMirror else self.GetRevisionId()
+        except ManifestInvalidRevisionError:
+            lrev = ""
+        setenv("REPO_LREV", lrev)
+        setenv("REPO_RREV", self.revisionExpr)
+        setenv("REPO_UPSTREAM", self.upstream)
+        setenv("REPO_DEST_BRANCH", self.dest_branch)
+
+        for annotation in self.annotations:
+            setenv(f"REPO__{annotation.name}", annotation.value)
+
+        return env
 
     def SetRevision(self, revisionExpr, revisionId=None):
         """Set revisionId based on revision expression and id"""
@@ -699,14 +785,27 @@ class Project:
         work_git is otheriwse inaccessible (e.g. an incomplete sync).
         """
         try:
-            b = self.work_git.GetHead()
+            b = self._GetHead()
         except NoManifestException:
             # If the local checkout is in a bad state, don't barf.  Let the
             # callers process this like the head is unreadable.
             return None
-        if b.startswith(R_HEADS):
+        if b and b.startswith(R_HEADS):
             return b[len(R_HEADS) :]
         return None
+
+    def _GetHead(self) -> Optional[str]:
+        """Return worktree HEAD, reusing a compatible loaded ref snapshot."""
+        if not self.work_git:
+            return None
+        # Git worktrees keep the checkout's HEAD in the worktree admin dir,
+        # while bare_ref reads the shared repository.  Its HEAD is not the
+        # checked-out worktree's HEAD and must not be reused here.
+        if not self.use_git_worktrees and self.bare_ref.is_loaded:
+            head = self.bare_ref.head
+            if head:
+                return head
+        return self.work_git.GetHead()
 
     def IsRebaseInProgress(self):
         """Returns true if a rebase or "am" is in progress"""
@@ -721,6 +820,17 @@ class Project:
     def IsCherryPickInProgress(self):
         """Returns True if a cherry-pick is in progress."""
         return os.path.exists(self.work_git.GetDotgitPath("CHERRY_PICK_HEAD"))
+
+    def _OperationInProgress(self) -> Optional[str]:
+        """Return the name of the Git operation in progress, if any."""
+        if self.IsRebaseInProgress():
+            return "rebase"
+        if self.IsCherryPickInProgress():
+            return "cherry-pick"
+        for state, name in (("MERGE_HEAD", "merge"), ("REVERT_HEAD", "revert")):
+            if os.path.exists(self.work_git.GetDotgitPath(state)):
+                return name
+        return None
 
     def _AbortRebase(self):
         """Abort ongoing rebase, cherry-pick or patch apply (am).
@@ -737,11 +847,70 @@ class Project:
         _git("rebase", "--abort")
         _git("am", "--abort")
 
-    def IsDirty(self, consider_untracked=True):
+    def _RefreshIndexStatCache(self) -> None:
+        """Refresh the index's cached stat information."""
+        args = ["--unmerged", "--ignore-missing", "--refresh"]
+
+        # Run twice because -q is needed and unhelpful in equal measure. It
+        # keeps git quiet about uncommitted changes, which would otherwise
+        # exit 1 and report a failure to telemetry for every modified project,
+        # but it also suppresses the reason a refresh failed, leaving a bare
+        # exit 128. So refresh with it, and repeat without it only to get
+        # the reason.
+        try:
+            self.work_git.update_index("-q", *args, log_as_error=False)
+            return
+        except GitError:
+            pass
+
+        # Exit code 1 means there are modified files, which is okay.
+        try:
+            self.work_git.update_index(*args)
+        except GitCommandError as e:
+            if e.git_rc != 1:
+                raise
+
+    def IsDirty(self, consider_untracked: bool = True) -> bool:
         """Is the working directory modified in some way?"""
-        self.work_git.update_index(
-            "-q", "--unmerged", "--ignore-missing", "--refresh"
+        status = self._GetStatusSnapshot(
+            untracked_files="normal" if consider_untracked else "no"
         )
+        if status is not None:
+            return status.is_dirty(consider_untracked=consider_untracked)
+
+        return self._IsDirtyLegacy(consider_untracked=consider_untracked)
+
+    def _GetStatusSnapshot(
+        self,
+        untracked_files: str = "all",
+        branch: bool = False,
+        ahead_behind: bool = False,
+        show_stash: bool = False,
+    ) -> Optional[git_status.StatusSnapshot]:
+        """Read one porcelain-v2 snapshot, or select the legacy path."""
+        if not git_require((2, 11, 0)):
+            return None
+        try:
+            return git_status.GetStatus(
+                self,
+                self.gitdir,
+                untracked_files=untracked_files,
+                branch=branch,
+                ahead_behind=ahead_behind,
+                show_stash=show_stash,
+            )
+        except (GitError, ValueError, git_status.UnsupportedStatusError) as e:
+            logger.warning(
+                "project %s: porcelain v2 status failed; using legacy "
+                "status: %s",
+                self.RelPath(local=False),
+                e,
+            )
+            return None
+
+    def _IsDirtyLegacy(self, consider_untracked: bool = True) -> bool:
+        """Check dirty state with plumbing supported by older Git."""
+        self._RefreshIndexStatCache()
         if self.work_git.DiffZ("diff-index", "-M", "--cached", HEAD):
             return True
         if self.work_git.DiffZ("diff-files"):
@@ -761,6 +930,21 @@ class Project:
             log_as_error=False,
         )
         return p.Wait() == 0
+
+    def _HasDirtyOrStash(self) -> bool:
+        """Check dirty and normal stash state with one status when possible."""
+        has_status_stash = git_require((2, 35, 0))
+        status = self._GetStatusSnapshot(
+            untracked_files="normal",
+            show_stash=has_status_stash,
+        )
+        if status is not None:
+            if status.is_dirty(consider_untracked=True):
+                return True
+            if has_status_stash:
+                return bool(status.stash_count)
+            return self.HasStash()
+        return self.IsDirty(consider_untracked=True) or self.HasStash()
 
     _userident_name = None
     _userident_email = None
@@ -806,8 +990,8 @@ class Project:
 
     def GetBranches(self):
         """Get all existing local branches."""
-        current = self.CurrentBranch
         all_refs = self._allrefs
+        current = self.CurrentBranch
         heads = {}
 
         for name, ref_id in all_refs.items():
@@ -857,7 +1041,7 @@ class Project:
 
         return matched
 
-    def UncommitedFiles(self, get_all=True):
+    def UncommittedFiles(self, get_all: bool = True) -> List[str]:
         """Returns a list of strings, uncommitted files in the git tree.
 
         Args:
@@ -865,10 +1049,48 @@ class Project:
                 uncommitted files. If False - return as soon as any kind of
                 uncommitted files is detected.
         """
+        status = self._GetStatusSnapshot(untracked_files="all")
+        if status is not None:
+            return self._UncommittedFilesFromStatus(status, get_all=get_all)
+
+        return self._UncommittedFilesLegacy(get_all=get_all)
+
+    def _UncommittedFilesFromStatus(
+        self, status: git_status.StatusSnapshot, get_all: bool = True
+    ) -> List[str]:
+        """Format uncommitted paths from a porcelain-v2 snapshot."""
         details = []
-        self.work_git.update_index(
-            "-q", "--unmerged", "--ignore-missing", "--refresh"
-        )
+        if self.IsRebaseInProgress():
+            details.append("rebase in progress")
+            if not get_all:
+                return details
+
+        changes = []
+        for path, entry in status.index_changes.items():
+            changes.append(path)
+            # The legacy diff-index call did not enable rename detection, so
+            # it reported a staged rename as delete(source) plus add(target).
+            if entry.status == "R" and entry.src_path:
+                changes.append(entry.src_path)
+        changes.sort()
+        if changes:
+            details.extend(changes)
+            if not get_all:
+                return details
+
+        changes = list(status.worktree_changes)
+        if changes:
+            details.extend(changes)
+            if not get_all:
+                return details
+
+        details.extend(status.untracked)
+        return details
+
+    def _UncommittedFilesLegacy(self, get_all: bool = True) -> List[str]:
+        """List uncommitted paths with plumbing supported by older Git."""
+        details = []
+        self._RefreshIndexStatCache()
         if self.IsRebaseInProgress():
             details.append("rebase in progress")
             if not get_all:
@@ -896,11 +1118,16 @@ class Project:
         """Returns a list of strings, untracked files in the git tree."""
         return self.work_git.LsOthers()
 
-    def HasChanges(self):
+    def HasChanges(self) -> bool:
         """Returns true if there are uncommitted changes."""
-        return bool(self.UncommitedFiles(get_all=False))
+        return bool(self.UncommittedFiles(get_all=False))
 
-    def PrintWorkTreeStatus(self, output_redir=None, quiet=False, local=False):
+    def PrintWorkTreeStatus(
+        self,
+        output_redir: Any = None,
+        quiet: bool = False,
+        local: bool = False,
+    ) -> Optional[str]:
         """Prints the status of the repository to stdout.
 
         Args:
@@ -919,14 +1146,103 @@ class Project:
             print('  missing (run "repo sync")', file=output_redir)
             return
 
-        self.work_git.update_index(
-            "-q", "--unmerged", "--ignore-missing", "--refresh"
+        status = self._GetStatusSnapshot(
+            untracked_files="all",
+            branch=True,
+            ahead_behind=not quiet,
         )
+        if status is not None:
+            ahead = status.ahead
+            behind = status.behind
+            if (
+                not quiet
+                and status.current_branch is not None
+                and not status.has_ahead_behind
+            ):
+                ahead, behind = self._GetBranchAheadBehind(
+                    status.current_branch
+                )
+            return self._RenderWorkTreeStatus(
+                status.index_changes,
+                status.worktree_changes,
+                status.untracked,
+                self.IsRebaseInProgress(),
+                status.current_branch,
+                ahead,
+                behind,
+                output_redir=output_redir,
+                quiet=quiet,
+                local=local,
+            )
+
+        return self._PrintWorkTreeStatusLegacy(
+            output_redir=output_redir, quiet=quiet, local=local
+        )
+
+    def _PrintWorkTreeStatusLegacy(
+        self, output_redir: Any = None, quiet: bool = False, local: bool = False
+    ) -> str:
+        """Render status using plumbing supported by older Git."""
+        self._RefreshIndexStatCache()
         rb = self.IsRebaseInProgress()
         di = self.work_git.DiffZ("diff-index", "-M", "--cached", HEAD)
         df = self.work_git.DiffZ("diff-files")
         do = self.work_git.LsOthers()
-        if not rb and not di and not df and not do and not self.CurrentBranch:
+        if quiet and (rb or di or df or do):
+            branch_name = None
+        else:
+            branch_name = self.CurrentBranch
+        ahead = behind = 0
+        if branch_name is not None and not quiet:
+            ahead, behind = self._GetBranchAheadBehind(branch_name)
+
+        return self._RenderWorkTreeStatus(
+            di,
+            df,
+            do,
+            rb,
+            branch_name,
+            ahead,
+            behind,
+            output_redir=output_redir,
+            quiet=quiet,
+            local=local,
+        )
+
+    def _GetBranchAheadBehind(self, branch_name: str) -> Tuple[int, int]:
+        """Return divergence when status could not supply branch.ab."""
+        ahead = behind = 0
+        branch_obj = self.GetBranch(branch_name)
+        try:
+            local_merge = branch_obj.LocalMerge
+            if local_merge:
+                left_right = self.work_git.rev_list(
+                    "--left-right",
+                    "--count",
+                    f"{local_merge}...{R_HEADS}{branch_name}",
+                )
+                left, right = left_right[0].split()
+                behind = int(left)
+                ahead = int(right)
+        except (GitError, IndexError, ValueError):
+            pass
+        return ahead, behind
+
+    def _RenderWorkTreeStatus(
+        self,
+        di: Any,
+        df: Any,
+        do: Any,
+        rb: bool,
+        branch_name: Optional[str],
+        ahead: int,
+        behind: int,
+        output_redir: Any = None,
+        quiet: bool = False,
+        local: bool = False,
+    ) -> str:
+        """Render a normalized worktree snapshot."""
+        if not rb and not di and not df and not do and branch_name is None:
             return "CLEAN"
 
         out = StatusColoring(self.config)
@@ -938,16 +1254,35 @@ class Project:
             out.nl()
             return "DIRTY"
 
-        branch = self.CurrentBranch
-        if branch is None:
+        if branch_name is None:
             out.nobranch("(*** NO BRANCH ***)")
         else:
-            out.branch("branch %s", branch)
+            ahead_behind = ""
+            if ahead and behind:
+                ahead_behind = f" [ahead {ahead}, behind {behind}]"
+            elif ahead:
+                ahead_behind = f" [ahead {ahead}]"
+            elif behind:
+                ahead_behind = f" [behind {behind}]"
+            out.branch("branch %s%s", branch_name, ahead_behind)
         out.nl()
 
         if rb:
             out.important("prior sync failed; rebase still in progress")
             out.nl()
+
+        def _SafePath(path_str: str) -> str:
+            stream = output_redir if output_redir is not None else sys.stdout
+            encoding = getattr(stream, "encoding", None) or "utf-8"
+            errors = getattr(stream, "errors", None)
+            if errors not in ("surrogateescape", "backslashreplace", "replace"):
+                try:
+                    path_str.encode(encoding)
+                except UnicodeEncodeError:
+                    return path_str.encode(encoding, "backslashreplace").decode(
+                        encoding
+                    )
+            return path_str
 
         paths = []
         paths.extend(di.keys())
@@ -975,12 +1310,15 @@ class Project:
             else:
                 f_status = "-"
 
+            disp_p = _SafePath(p)
             if i and i.src_path:
+                disp_src = _SafePath(i.src_path)
                 line = (
-                    f" {i_status}{f_status}\t{i.src_path} => {p} ({i.level}%)"
+                    f" {i_status}{f_status}\t"
+                    f"{disp_src} => {disp_p} ({i.level}%)"
                 )
             else:
-                line = f" {i_status}{f_status}\t{p}"
+                line = f" {i_status}{f_status}\t{disp_p}"
 
             if i and not f:
                 out.added("%s", line)
@@ -1062,24 +1400,37 @@ class Project:
 
     def GetUploadableBranches(self, selected_branch=None):
         """List any branches which can be uploaded for review."""
-        heads = {}
-        pubed = {}
+        if selected_branch:
+            branch = self.GetBranch(selected_branch)
+            if not branch.LocalMerge:
+                return []
+            head_id = self.bare_ref.get(R_HEADS + selected_branch)
+            if not head_id:
+                return []
+            pub_id = self.bare_ref.get(R_PUB + selected_branch)
+            if pub_id and pub_id == head_id:
+                return []
+            rb = self.GetUploadableBranch(selected_branch)
+            if rb:
+                rb.branch.current = selected_branch == self.CurrentBranch
+                return [rb]
+            return []
 
-        for name, ref_id in self._allrefs.items():
-            if name.startswith(R_HEADS):
-                heads[name[len(R_HEADS) :]] = ref_id
-            elif name.startswith(R_PUB):
-                pubed[name[len(R_PUB) :]] = ref_id
+        # Optimization: Skip scanning _allrefs (which spawns git processes)
+        # if no local branches with upstream tracking exist in .git/config.
+        if not any(self.config.GetSubSections("branch")):
+            return []
+
+        branches = self.GetBranches()
 
         ready = []
-        for branch, ref_id in heads.items():
-            if branch in pubed and pubed[branch] == ref_id:
-                continue
-            if selected_branch and branch != selected_branch:
+        for branch, branch_config in branches.items():
+            if branch_config.published == branch_config.revision:
                 continue
 
             rb = self.GetUploadableBranch(branch)
             if rb:
+                rb.branch.current = branch_config.current
                 ready.append(rb)
         return ready
 
@@ -1109,7 +1460,8 @@ class Project:
         validate_certs=True,
         push_options=None,
         patchset_description=None,
-    ):
+        git_event_log: Optional[EventLog] = None,
+    ) -> None:
         """Uploads the named branch for code review."""
         if branch is None:
             branch = self.CurrentBranch
@@ -1198,13 +1550,46 @@ class Project:
             ref_spec = ref_spec + "%" + ",".join(opts)
         cmd.append(ref_spec)
 
-        GitCommand(self, cmd, bare=True, verify_command=True).Wait()
+        push_cmd = GitCommand(
+            self,
+            cmd,
+            bare=True,
+            verify_command=True,
+        )
+        push_cmd.Wait()
 
+        cls_urls = self._FindGerritUrls(push_cmd.stderr)
+
+        try:
+            rb = ReviewableBranch(self, branch, branch.LocalMerge)
+            modified_files_list = rb.modified_files
+            if git_event_log:
+                git_event_log.LogDataConfigEvents(
+                    {
+                        "cls": ",".join(cls_urls),
+                        "remote": branch.remote.name,
+                        "branch": branch.name,
+                        "files": ",".join(modified_files_list),
+                    },
+                    "repo.uploadstate",
+                )
+        except Exception as e:
+            logger.error("Tracing failed: %s", str(e))
         if not dryrun:
             msg = f"posted to {branch.remote.review} for {dest_branch}"
             self.bare_git.UpdateRef(
                 R_PUB + branch.name, R_HEADS + branch.name, message=msg
             )
+
+    @staticmethod
+    def _FindGerritUrls(stderr: Optional[str]) -> List[str]:
+        """Extracts Gerrit review URLs from git push output."""
+        if not stderr:
+            return []
+        return [
+            match.group(1)
+            for match in re.finditer(r"(https?://[^/]+/c/.+?/\+/\d+)", stderr)
+        ]
 
     @staticmethod
     def _encode_patchset_description(original):
@@ -1301,7 +1686,7 @@ class Project:
         except (GitError, IndexError, ValueError):
             return False
 
-        if self.IsDirty(consider_untracked=True) or self.HasStash():
+        if self._HasDirtyOrStash():
             return False
 
         return True
@@ -1467,53 +1852,32 @@ class Project:
 
         # If the project has been manually unshallowed (e.g. via
         # `git fetch --unshallow`), don't re-shallow it during sync.
-        if (
-            depth
-            and not is_new
-            and not os.path.exists(os.path.join(self.gitdir, "shallow"))
-        ):
+        if depth and not is_new and not self._HasShallow():
             depth = None
 
         if depth and clone_filter_for_depth:
             depth = None
             clone_filter = clone_filter_for_depth
 
-        # See if we can skip the network fetch entirely.
+        custom_fetch_configured = (
+            self.manifest.manifestProject.use_local_gitdirs
+            and self.manifest.manifestProject.fetch_cmd
+            and not isinstance(self, MetaProject)
+        )
+
         remote_fetched = False
-        if not (
-            optimized_fetch
-            and IsId(self.revisionExpr)
-            and self._CheckForImmutableRevision(
-                use_superproject=use_superproject
-            )
-            and (
-                not depth
-                or os.path.exists(os.path.join(self.gitdir, "shallow"))
-            )
-        ):
+        if custom_fetch_configured:
+            # The custom fetch command is executed unconditionally on every sync
+            # because it is responsible for updating tracking refs and
+            # FETCH_HEAD.
             remote_fetched = True
             try:
-                if not self._RemoteFetch(
-                    initial=is_new,
-                    quiet=quiet,
-                    verbose=verbose,
-                    output_redir=output_redir,
-                    alt_dir=alt_dir,
-                    use_superproject=use_superproject,
-                    current_branch_only=current_branch_only,
-                    tags=tags,
-                    prune=prune,
-                    depth=depth,
-                    submodules=submodules,
-                    force_sync=force_sync,
-                    ssh_proxy=ssh_proxy,
-                    clone_filter=clone_filter,
-                    retry_fetches=retry_fetches,
-                ):
+                if not self._CustomFetch(verbose=verbose):
                     return SyncNetworkHalfResult(
                         remote_fetched,
                         SyncNetworkHalfError(
-                            f"Unable to remote fetch project {self.name}",
+                            f"Unable to fetch project {self.name} using "
+                            "fetchcmd",
                             project=self.name,
                         ),
                     )
@@ -1522,6 +1886,51 @@ class Project:
                     remote_fetched,
                     e,
                 )
+        else:
+            # See if we can skip the standard network fetch entirely.
+            has_shallow = self._HasShallow()
+            skip_fetch = (
+                optimized_fetch
+                and IsId(self.revisionExpr)
+                and self._CheckForImmutableRevision(
+                    use_superproject=use_superproject,
+                    depth=depth,
+                )
+                and (has_shallow or not self._IsShallow(depth))
+            )
+
+            if not skip_fetch:
+                remote_fetched = True
+                try:
+                    if not self._RemoteFetch(
+                        initial=is_new,
+                        quiet=quiet,
+                        verbose=verbose,
+                        output_redir=output_redir,
+                        alt_dir=alt_dir,
+                        use_superproject=use_superproject,
+                        current_branch_only=current_branch_only,
+                        tags=tags,
+                        prune=prune,
+                        depth=depth,
+                        submodules=submodules,
+                        force_sync=force_sync,
+                        ssh_proxy=ssh_proxy,
+                        clone_filter=clone_filter,
+                        retry_fetches=retry_fetches,
+                    ):
+                        return SyncNetworkHalfResult(
+                            remote_fetched,
+                            SyncNetworkHalfError(
+                                f"Unable to remote fetch project {self.name}",
+                                project=self.name,
+                            ),
+                        )
+                except RepoError as e:
+                    return SyncNetworkHalfResult(
+                        remote_fetched,
+                        e,
+                    )
 
         mp = self.manifest.manifestProject
         dissociate = mp.dissociate
@@ -1562,12 +1971,16 @@ class Project:
         self._InitHooks()
 
     def _CopyAndLinkFiles(self):
+        if not self.worktree or not platform_utils.isdir(self.worktree):
+            return
         for copyfile in self.copyfiles:
             copyfile._Copy()
         for linkfile in self.linkfiles:
             linkfile._Link()
 
-    def GetCommitRevisionId(self):
+    def GetCommitRevisionId(
+        self, all_refs: Optional[Dict[str, str]] = None
+    ) -> str:
         """Get revisionId of a commit.
 
         Use this method instead of GetRevisionId to get the id of the commit
@@ -1577,14 +1990,32 @@ class Project:
         if self.revisionId:
             return self.revisionId
         if not self.revisionExpr.startswith(R_TAGS):
-            return self.GetRevisionId(self._allrefs)
+            if all_refs is None:
+                all_refs = self._allrefs
+            return self.GetRevisionId(all_refs)
 
         try:
-            return self.bare_git.rev_list(self.revisionExpr, "-1")[0]
+            return self.bare_git.ResolveCommit(self.revisionExpr)
         except GitError:
             raise ManifestInvalidRevisionError(
                 f"revision {self.revisionExpr} in {self.name} not found"
             )
+
+    def GetHeadRevisionId(self) -> Optional[str]:
+        """Get the commit revision of the checked out HEAD.
+
+        Returns None if worktree is not checked out or HEAD cannot be resolved.
+        """
+        if self.work_git:
+            if not self.use_git_worktrees and self.bare_ref.is_loaded:
+                head = self.bare_ref.get(HEAD)
+                if head:
+                    return head
+            try:
+                return self.work_git.rev_parse("HEAD")
+            except GitError:
+                pass
+        return None
 
     def GetRevisionId(self, all_refs=None):
         if self.revisionId:
@@ -1597,7 +2028,7 @@ class Project:
             return all_refs[rev]
 
         try:
-            return self.bare_git.rev_parse("--verify", "%s^0" % rev)
+            return self.bare_git.ResolveCommit(rev)
         except GitError:
             raise ManifestInvalidRevisionError(
                 f"revision {self.revisionExpr} in {self.name} not found"
@@ -1609,15 +2040,27 @@ class Project:
 
         self.revisionId = revisionId
 
+    @property
+    def UseReprojectCmd(self) -> bool:
+        """Whether repo.reprojectcmd materializes this project's tree.
+
+        MetaProjects (repo itself and the manifests) always use Git. See
+        docs/reproject-cmd.md.
+        """
+        if isinstance(self, MetaProject):
+            return False
+        mp = self.manifest.manifestProject
+        return bool(mp.use_local_gitdirs and mp.reproject_cmd)
+
     def Sync_LocalHalf(
         self,
-        syncbuf,
-        force_sync=False,
-        force_checkout=False,
-        force_rebase=False,
-        submodules=False,
-        verbose=False,
-    ):
+        syncbuf: Any,
+        force_sync: bool = False,
+        force_checkout: bool = False,
+        force_rebase: bool = False,
+        submodules: bool = False,
+        verbose: bool = False,
+    ) -> None:
         """Perform only the local IO portion of the sync process.
 
         Network access is not required.
@@ -1631,6 +2074,29 @@ class Project:
                 LocalSyncFail(
                     "Cannot checkout %s due to missing network sync; Run "
                     "`repo sync -n %s` first." % (self.name, self.name),
+                    project=self.name,
+                )
+            )
+            return
+
+        if not isinstance(self, MetaProject):
+            mp = self.manifest.manifestProject
+            if mp.reproject_cmd and not mp.use_local_gitdirs:
+                fail(
+                    LocalSyncFail(
+                        "repo.reprojectcmd requires repo.uselocalgitdirs to be "
+                        "enabled",
+                        project=self.name,
+                    )
+                )
+                return
+
+        reproject = self.UseReprojectCmd
+        if reproject and self.parent:
+            fail(
+                LocalSyncFail(
+                    "repo.reprojectcmd does not support nested projects or "
+                    "submodules",
                     project=self.name,
                 )
             )
@@ -1666,8 +2132,30 @@ class Project:
                 )
                 return
 
+        head = self._GetHead()
+        if head and head.startswith(R_HEADS):
+            branch = head[len(R_HEADS) :]
+            try:
+                head = all_refs[head]
+            except KeyError:
+                head = None
+        else:
+            branch = None
+
+        def _checkout() -> None:
+            """Detach HEAD at revid, like `git checkout <revid>`."""
+            if reproject:
+                self._ReprojectCheckout(revid, head, verbose=verbose)
+            else:
+                self._Checkout(revid, force_checkout=force_checkout, quiet=True)
+
         def _doff():
-            self._FastForward(revid)
+            if reproject:
+                self._ReprojectBranch(
+                    revid, head, f"merge {revid}: Fast-forward", verbose=verbose
+                )
+            else:
+                self._FastForward(revid)
             self._CopyAndLinkFiles()
 
         def _dorebase():
@@ -1693,16 +2181,6 @@ class Project:
             if p.Wait() != 0:
                 logger.warning("warn: %s: stateless gc failed", self.name)
 
-        head = self.work_git.GetHead()
-        if head.startswith(R_HEADS):
-            branch = head[len(R_HEADS) :]
-            try:
-                head = all_refs[head]
-            except KeyError:
-                head = None
-        else:
-            branch = None
-
         if branch is None or syncbuf.detach_head:
             # Currently on a detached HEAD.  The user is assumed to
             # not have any local modifications worth worrying about.
@@ -1726,15 +2204,17 @@ class Project:
                     self._CopyAndLinkFiles()
                     return
             else:
-                lost = self._revlist(not_rev(revid), HEAD)
-                if lost and verbose:
-                    syncbuf.info(self, "discarding %d commits", len(lost))
+                if verbose:
+                    lost_output = self._revlist("--count", not_rev(revid), HEAD)
+                    lost = int(lost_output[0]) if lost_output else 0
+                    if lost:
+                        syncbuf.info(self, "discarding %d commits", lost)
 
             try:
-                self._Checkout(revid, force_checkout=force_checkout, quiet=True)
+                _checkout()
                 if submodules:
                     self._SyncSubmodules(quiet=True)
-            except GitError as e:
+            except (GitError, LocalSyncFail) as e:
                 fail(e)
                 return
             self._CopyAndLinkFiles()
@@ -1758,16 +2238,17 @@ class Project:
                 self, "leaving %s; does not track upstream", branch.name
             )
             try:
-                self._Checkout(revid, quiet=True)
+                _checkout()
                 if submodules:
                     self._SyncSubmodules(quiet=True)
-            except GitError as e:
+            except (GitError, LocalSyncFail) as e:
                 fail(e)
                 return
             self._CopyAndLinkFiles()
             return
 
-        upstream_gain = self._revlist(not_rev(HEAD), revid)
+        gain_output = self._revlist("--count", not_rev(HEAD), revid)
+        upstream_gain = int(gain_output[0]) if gain_output else 0
 
         # See if we can perform a fast forward merge.  This can happen if our
         # branch isn't in the exact same state as we last published.
@@ -1781,7 +2262,7 @@ class Project:
             pub = self.WasPublished(branch.name, all_refs)
 
         if pub:
-            not_merged = self._revlist(not_rev(revid), pub)
+            not_merged = self._revlist("-1", not_rev(revid), pub)
             if not_merged:
                 if upstream_gain:
                     if force_rebase:
@@ -1797,12 +2278,17 @@ class Project:
                                 "branch %s is published (but not merged) and "
                                 "is now %d commits behind. Fix this manually "
                                 "or rerun with the --rebase option to force a "
-                                "rebase." % (branch.name, len(upstream_gain)),
+                                "rebase." % (branch.name, upstream_gain),
                                 project=self.name,
                             )
                         )
                     return
-                syncbuf.later1(self, _doff, not verbose)
+                if reproject:
+                    # HEAD is ahead of revid, so there is no tree to
+                    # materialize: Git's fast-forward would be a no-op.
+                    self._CopyAndLinkFiles()
+                else:
+                    syncbuf.later1(self, _doff, not verbose)
                 return
             elif pub == head:
                 # All published commits are merged, and thus we are a
@@ -1828,7 +2314,9 @@ class Project:
             self._CopyAndLinkFiles()
             return
 
-        if self.IsDirty(consider_untracked=False):
+        if (not reproject or (cnt_mine > 0 and self.rebase)) and self.IsDirty(
+            consider_untracked=False
+        ):
             fail(_DirtyError(project=self.name))
             return
 
@@ -1874,11 +2362,19 @@ class Project:
             syncbuf.later2(self, _docopyandlink, not verbose)
         elif local_changes:
             try:
-                self._ResetHard(revid)
+                if reproject:
+                    self._ReprojectBranch(
+                        revid,
+                        head,
+                        f"reset: moving to {revid}",
+                        verbose=verbose,
+                    )
+                else:
+                    self._ResetHard(revid)
                 if submodules:
                     self._SyncSubmodules(quiet=True)
                 self._CopyAndLinkFiles()
-            except GitError as e:
+            except (GitError, LocalSyncFail) as e:
                 fail(e)
                 return
         else:
@@ -1917,7 +2413,11 @@ class Project:
         """Download a single patch set of a single change to FETCH_HEAD."""
         remote = self.GetRemote()
 
-        cmd = ["fetch", remote.name]
+        cmd = ["fetch"]
+        if git_require((2, 17, 0)):
+            cmd.append("--no-filter")
+        cmd.append("--no-tags")
+        cmd.append(remote.name)
         cmd.append(
             "refs/changes/%2.2d/%d/%d" % (change_id % 100, change_id, patch_id)
         )
@@ -1940,28 +2440,51 @@ class Project:
 
         Args:
             verbose: Whether to show verbose messages.
-            force: Always delete tree even if dirty.
+            force: Always delete tree even if dirty or corrupted.
 
         Returns:
             True if the worktree was completely cleaned out.
         """
-        if self.IsDirty():
+        is_dirty = False
+        is_corrupted = False
+        try:
+            is_dirty = self.IsDirty()
+        except GitError:
+            is_corrupted = True
+
+        rel_path = self.RelPath(local=False)
+
+        if is_dirty or is_corrupted:
             if force:
-                logger.warning(
-                    "warning: %s: Removing dirty project: uncommitted changes "
-                    "lost.",
-                    self.RelPath(local=False),
-                )
+                if is_corrupted:
+                    logger.warning(
+                        "warning: %s: Removing corrupted project.",
+                        rel_path,
+                    )
+                else:
+                    logger.warning(
+                        "warning: %s: Removing dirty project: "
+                        "uncommitted changes lost.",
+                        rel_path,
+                    )
             else:
-                msg = (
-                    "error: %s: Cannot remove project: uncommitted "
-                    "changes are present.\n" % self.RelPath(local=False)
-                )
-                logger.error(msg)
-                raise DeleteDirtyWorktreeError(msg, project=self.name)
+                if is_corrupted:
+                    msg = (
+                        f"error: {rel_path}: Cannot remove project: "
+                        "project is corrupted.\n"
+                    )
+                    logger.error(msg)
+                    raise DeleteWorktreeError(msg, project=self.name)
+                else:
+                    msg = (
+                        f"error: {rel_path}: Cannot remove project: "
+                        "uncommitted changes are present.\n"
+                    )
+                    logger.error(msg)
+                    raise DeleteDirtyWorktreeError(msg, project=self.name)
 
         if verbose:
-            print(f"{self.RelPath(local=False)}: Deleting obsolete checkout.")
+            print(f"{rel_path}: Deleting obsolete checkout.")
 
         # Unlock and delink from the main worktree.  We don't use git's worktree
         # remove because it will recursively delete projects -- we handle that
@@ -1969,23 +2492,33 @@ class Project:
         if self.use_git_worktrees:
             needle = os.path.realpath(self.gitdir)
             # Find the git worktree commondir under .repo/worktrees/.
-            output = self.bare_git.worktree("list", "--porcelain").splitlines()[
-                0
-            ]
-            assert output.startswith("worktree "), output
-            commondir = output[9:]
-            # Walk each of the git worktrees to see where they point.
-            configs = os.path.join(commondir, "worktrees")
-            for name in os.listdir(configs):
-                gitdir = os.path.join(configs, name, "gitdir")
-                with open(gitdir) as fp:
-                    relpath = fp.read().strip()
-                # Resolve the checkout path and see if it matches this project.
-                fullpath = os.path.realpath(
-                    os.path.join(configs, name, relpath)
+            try:
+                output = self.bare_git.worktree(
+                    "list", "--porcelain"
+                ).splitlines()[0]
+                assert output.startswith("worktree "), output
+                commondir = output[9:]
+                # Walk each of the git worktrees to see where they point.
+                configs = os.path.join(commondir, "worktrees")
+                if os.path.exists(configs):
+                    for name in os.listdir(configs):
+                        gitdir = os.path.join(configs, name, "gitdir")
+                        with open(gitdir) as fp:
+                            relpath = fp.read().strip()
+                        # Resolve the checkout path and see if it
+                        # matches this project.
+                        fullpath = os.path.realpath(
+                            os.path.join(configs, name, relpath)
+                        )
+                        if fullpath == needle:
+                            platform_utils.rmtree(os.path.join(configs, name))
+            except GitError as e:
+                logger.warning(
+                    "warning: %s: Failed to list worktrees, skipping worktree "
+                    "cleanup: %s",
+                    rel_path,
+                    e,
                 )
-                if fullpath == needle:
-                    platform_utils.rmtree(os.path.join(configs, name))
 
         # Delete the .git directory first, so we're less likely to have a
         # partially working git repository around. There shouldn't be any git
@@ -2006,7 +2539,7 @@ class Project:
                 logger.error(
                     "error: %s: Failed to delete obsolete checkout; remove "
                     "manually, then run `repo sync -l`.",
-                    self.RelPath(local=False),
+                    rel_path,
                 )
                 raise DeleteWorktreeError(aggregate_errors=[e])
 
@@ -2070,7 +2603,7 @@ class Project:
                 logger.error(
                     "%s: Failed to delete obsolete checkout.\n",
                     "       Remove manually, then run `repo sync -l`.",
-                    self.RelPath(local=False),
+                    rel_path,
                 )
                 raise DeleteWorktreeError(aggregate_errors=errors)
 
@@ -2192,7 +2725,7 @@ class Project:
             # Doesn't exist
             return None
 
-        head = self.work_git.GetHead()
+        head = self._GetHead()
         if head == rev:
             # We can't destroy the branch while we are sitting
             # on it.  Switch to a detached HEAD.
@@ -2214,9 +2747,9 @@ class Project:
 
     def PruneHeads(self):
         """Prune any topic branches already merged into upstream."""
-        cb = self.CurrentBranch
         kill = []
         left = self._allrefs
+        cb = self.CurrentBranch
         for name in left.keys():
             if name.startswith(R_HEADS):
                 name = name[len(R_HEADS) :]
@@ -2228,17 +2761,25 @@ class Project:
         if not kill and not cb:
             return []
 
-        rev = self.GetRevisionId(left)
+        rev = self.GetCommitRevisionId(left)
+        head = left.get(R_HEADS + cb) if cb is not None else None
         if (
             cb is not None
-            and not self._revlist(HEAD + "..." + rev)
+            and head == rev
             and not self.IsDirty(consider_untracked=False)
         ):
             self.work_git.DetachHead(HEAD)
             kill.append(cb)
 
         if kill:
-            old = self.bare_git.GetHead()
+            if not self.use_git_worktrees:
+                old = (
+                    head
+                    if cb in kill
+                    else (self.bare_ref.head or self.bare_git.GetHead())
+                )
+            else:
+                old = self.bare_git.GetHead()
 
             try:
                 self.bare_git.DetachHead(rev)
@@ -2253,7 +2794,11 @@ class Project:
                 if IsId(old):
                     self.bare_git.DetachHead(old)
                 else:
-                    self.bare_git.SetHead(old)
+                    branch = (
+                        old[len(R_HEADS) :] if old.startswith(R_HEADS) else old
+                    )
+                    if branch not in kill:
+                        self.bare_git.SetHead(old)
                 left = self._allrefs
 
             for branch in kill:
@@ -2269,6 +2814,7 @@ class Project:
         for branch in kill:
             if R_HEADS + branch in left:
                 branch = self.GetBranch(branch)
+                branch.current = branch.name == cb
                 base = branch.LocalMerge
                 if not base:
                     base = rev
@@ -2416,6 +2962,37 @@ class Project:
             return []
         return get_submodules(self.gitdir, rev)
 
+    def GetSubmoduleRevisions(self) -> Optional[Dict[str, str]]:
+        """Read the gitlinks of our submodules at our current revision.
+
+        Discovered submodules are derived from the revision their parent was
+        at when the manifest was loaded, which is before it gets fetched.
+        Once it is up-to-date, its gitlinks have to be read again, otherwise
+        the submodules would be synced to the revisions of the previous sync.
+
+        Returns:
+            The revision of every submodule, keyed by its path inside this
+            project, or None if our revision is not available locally. A
+            revision that is merely set does not have to be fetched yet, and
+            without its objects a removed submodule cannot be told apart from
+            one that was never fetched.
+        """
+        try:
+            rev = self.GetRevisionId()
+            self.bare_git.rev_list(
+                "-1",
+                "--missing=allow-any",
+                f"{rev}^0",
+                "--",
+                log_as_error=False,
+            )
+        except (GitError, ManifestInvalidRevisionError):
+            return None
+
+        return {
+            path: sha for sha, path, _url, _shallow in self._GetSubmodules()
+        }
+
     def GetDerivedSubprojects(self):
         result = []
         if not self.Exists:
@@ -2435,7 +3012,7 @@ class Project:
                 result.extend(project.GetDerivedSubprojects())
                 continue
 
-            if url.startswith(".."):
+            if url.startswith(("./", "../")):
                 url = urllib.parse.urljoin("%s/" % self.remote.url, url)
             remote = RemoteSpec(
                 self.remote.name,
@@ -2463,6 +3040,7 @@ class Project:
                 parent=self,
                 clone_depth=clone_depth,
                 is_derived=True,
+                gitlink_path=path,
             )
             result.append(subproject)
             result.extend(subproject.GetDerivedSubprojects())
@@ -2511,18 +3089,22 @@ class Project:
         return None
 
     def _CheckForImmutableRevision(
-        self, use_superproject: Optional[bool] = None
+        self,
+        use_superproject: Optional[bool] = None,
+        depth: Optional[int] = None,
     ) -> bool:
         try:
             # if revision (sha or tag) is not present then following function
             # throws an error.
             revs = [f"{self.revisionExpr}^0"]
             upstream_rev = None
+            verify_upstream = self._ShouldVerifyUpstream(
+                use_superproject=use_superproject,
+                depth=depth,
+            )
 
-            # Only check upstream when using superproject.
-            if self.upstream and git_superproject.UseSuperproject(
-                use_superproject, self.manifest
-            ):
+            # Ensure the local upstream tracking ref also exists in the ODB.
+            if verify_upstream:
                 upstream_rev = self.GetRemote().ToLocal(self.upstream)
                 revs.append(upstream_rev)
 
@@ -2534,11 +3116,8 @@ class Project:
                 log_as_error=False,
             )
 
-            # Only verify upstream relationship for superproject scenarios
-            # without affecting plain usage.
-            if self.upstream and git_superproject.UseSuperproject(
-                use_superproject, self.manifest
-            ):
+            # Verify revision is an ancestor of the upstream tracking ref.
+            if verify_upstream:
                 self.bare_git.merge_base(
                     "--is-ancestor",
                     self.revisionExpr,
@@ -2549,6 +3128,54 @@ class Project:
         except GitError:
             # There is no such persistent revision. We have to fetch it.
             return False
+
+    def _HasShallow(self) -> bool:
+        """Check if this project has a shallow file in its gitdir."""
+        return bool(
+            self.gitdir and os.path.exists(os.path.join(self.gitdir, "shallow"))
+        )
+
+    def _IsShallow(self, depth: Optional[int] = None) -> bool:
+        """Check if the project is shallow or sharing shallow objects."""
+        return bool(
+            self._HasShallow() or self._SharingProjectHasShallow() or depth
+        )
+
+    def _ShouldVerifyUpstream(
+        self,
+        use_superproject: Optional[bool] = None,
+        depth: Optional[int] = None,
+    ) -> bool:
+        """Whether to verify upstream ancestry during immutable revision
+        check."""
+        if not (IsId(self.revisionExpr) and self.upstream):
+            return False
+        if self._UseSuperprojectForUpstream(use_superproject):
+            return True
+        return not self._IsShallow(depth)
+
+    def _SharingProjectHasShallow(self) -> bool:
+        """Check if another project sharing this objdir has a "shallow" file.
+
+        If any project sharing this objdir has a shallow file in its gitdir,
+        then the shared objdir may be depth-limited, and every other project
+        sharing this objdir needs its own shallow file so that git knows
+        where history is truncated.
+        """
+        other_projects = self.manifest.GetProjectsWithName(
+            self.name, all_manifests=True
+        )
+        for proj in other_projects:
+            if proj.objdir == self.objdir and proj.gitdir != self.gitdir:
+                if proj._HasShallow():
+                    return True
+        return False
+
+    def _UseSuperprojectForUpstream(
+        self, use_superproject: Optional[bool] = None
+    ) -> bool:
+        """Whether to check upstream for superprojects."""
+        return git_superproject.UseSuperproject(use_superproject, self.manifest)
 
     def _FetchArchive(self, tarpath, cwd=None):
         cmd = ["archive", "-v", "-o", tarpath]
@@ -2565,6 +3192,128 @@ class Project:
             verify_command=True,
         )
         command.Wait()
+
+    def _CustomFetch(self, verbose=False) -> bool:
+        """Fetch using a custom command specified by repo.fetchcmd.
+
+        Populates the subshell with project-context environment variables,
+        including REPO_TREV (target revision resolved to a commit hash).
+
+        Expects the target commit to be reachable and tracking refs/FETCH_HEAD
+        to be updated upon a successful 0 exit code.
+
+        For a detailed contract, environment variables, and postconditions,
+        see docs/fetch-cmd.md.
+        """
+        # Resolve REPO_TREV (target revision resolved to a full commit hash).
+        repo_trev = None
+        if self.revisionId and IsId(self.revisionId):
+            repo_trev = self.revisionId
+
+        if not repo_trev:
+            output = self._LsRemote(self.upstream or self.revisionExpr)
+            if output:
+                lines = output.splitlines()
+                if lines:
+                    parts = lines[0].split()
+                    if parts:
+                        repo_trev = parts[0]
+
+        if not repo_trev:
+            logger.error("error: Cannot resolve REPO_TREV for %s", self.name)
+            return False
+
+        env = os.environ.copy()
+        env.update(self.GetEnvVars())
+        env["REPO_TREV"] = repo_trev
+        cmd_str = self.manifest.manifestProject.fetch_cmd
+
+        if verbose:
+            print(f"Running fetchcmd: {cmd_str} for {self.name}")
+
+        stdout = None if verbose else subprocess.PIPE
+        stderr = None if verbose else subprocess.PIPE
+        try:
+            p = subprocess.run(
+                cmd_str,
+                shell=True,
+                cwd=self.manifest.topdir,
+                env=env,
+                stdout=stdout,
+                stderr=stderr,
+                text=True,
+            )
+
+            if p.returncode != 0:
+                logger.error(
+                    "error: fetchcmd failed with exit code %d", p.returncode
+                )
+                if not verbose:
+                    logger.error("stderr: %s", p.stderr)
+                return False
+
+        except Exception as e:
+            logger.error("error: Failed to execute fetchcmd: %s", e)
+            return False
+
+        # Verify postconditions.
+        try:
+            self.bare_git.cat_file("-e", repo_trev)
+        except GitError:
+            logger.error(
+                "error: Postcondition failed: %s not found in object store",
+                repo_trev,
+            )
+            return False
+
+        try:
+            ref_name = self.GetRemote().ToLocal(self.revisionExpr)
+        except GitError as e:
+            logger.error("error: Failed to resolve tracking ref: %s", e)
+            return False
+        try:
+            resolved_ref = self.bare_git.rev_parse(ref_name)
+            if resolved_ref != repo_trev:
+                logger.error(
+                    "error: Postcondition failed: %s is %s, expected %s",
+                    ref_name,
+                    resolved_ref,
+                    repo_trev,
+                )
+                return False
+        except GitError:
+            logger.error("error: Postcondition failed: %s not found", ref_name)
+            return False
+
+        try:
+            fetch_head = self.bare_git.rev_parse("FETCH_HEAD")
+            if fetch_head != repo_trev:
+                logger.error(
+                    "error: Postcondition failed: FETCH_HEAD is %s, "
+                    "expected %s",
+                    fetch_head,
+                    repo_trev,
+                )
+                return False
+        except GitError:
+            logger.error("error: Postcondition failed: FETCH_HEAD not found")
+            return False
+
+        return True
+
+    def _GetUpstreamFallback(self) -> Optional[str]:
+        """Resolve a fallback upstream branch when revisionExpr is a SHA-1.
+
+        Returns manifest default upstream or revision if it names a branch,
+        or None to fall back to fetching all heads.
+        """
+        default = self.manifest.default
+        if not default:
+            return None
+        for cand in (default.upstreamExpr, default.revisionExpr):
+            if cand and not IsId(cand) and not cand.startswith(R_TAGS):
+                return cand
+        return None
 
     def _RemoteFetch(
         self,
@@ -2598,29 +3347,10 @@ class Project:
         if depth:
             current_branch_only = True
 
-        is_sha1 = bool(IsId(self.revisionExpr))
+        is_sha1 = IsId(self.revisionExpr)
+        upstream = self.upstream
 
         if current_branch_only:
-            if self.revisionExpr.startswith(R_TAGS):
-                # This is a tag and its commit id should never change.
-                tag_name = self.revisionExpr[len(R_TAGS) :]
-            elif self.upstream and self.upstream.startswith(R_TAGS):
-                # This is a tag and its commit id should never change.
-                tag_name = self.upstream[len(R_TAGS) :]
-
-            if is_sha1 or tag_name is not None:
-                if self._CheckForImmutableRevision(
-                    use_superproject=use_superproject
-                ) and (
-                    not depth
-                    or os.path.exists(os.path.join(self.gitdir, "shallow"))
-                ):
-                    if verbose:
-                        print(
-                            "Skipped fetching project %s (already have "
-                            "persistent ref)" % self.name
-                        )
-                    return True
             if is_sha1 and not depth:
                 # When syncing a specific commit and --depth is not set:
                 # * if upstream is explicitly specified and is not a sha1, fetch
@@ -2629,10 +3359,33 @@ class Project:
                 #   sync will fail.
                 # * otherwise, fetch all branches to make sure we end up with
                 #   the specific commit.
-                if self.upstream:
-                    current_branch_only = not IsId(self.upstream)
+                if not upstream:
+                    upstream = self._GetUpstreamFallback()
+
+                if upstream:
+                    current_branch_only = not IsId(upstream)
                 else:
                     current_branch_only = False
+
+            if self.revisionExpr.startswith(R_TAGS):
+                # This is a tag and its commit id should never change.
+                tag_name = self.revisionExpr[len(R_TAGS) :]
+            elif upstream and upstream.startswith(R_TAGS):
+                # This is a tag and its commit id should never change.
+                tag_name = upstream[len(R_TAGS) :]
+
+            if is_sha1 or tag_name is not None:
+                has_shallow = self._HasShallow()
+                if self._CheckForImmutableRevision(
+                    use_superproject=use_superproject,
+                    depth=depth,
+                ) and (has_shallow or not self._IsShallow(depth)):
+                    if verbose:
+                        print(
+                            "Skipped fetching project %s (already have "
+                            "persistent ref)" % self.name
+                        )
+                    return True
 
         if not name:
             name = self.remote.name
@@ -2692,7 +3445,7 @@ class Project:
             # have shallow objects or not. Tell git to unshallow all fetched
             # refs.  Don't do this with projects that don't have shallow
             # objects, since it is less efficient.
-            if os.path.exists(os.path.join(self.gitdir, "shallow")):
+            if self._HasShallow():
                 cmd.append("--depth=2147483647")
 
         # Use clone-depth="1" as a heuristic for repositories containing
@@ -2744,11 +3497,11 @@ class Project:
             # Shallow checkout of a specific commit, fetch from that commit and
             # not the heads only as the commit might be deeper in the history.
             spec.append(branch)
-            if self.upstream:
-                spec.append(self.upstream)
+            if upstream:
+                spec.append(upstream)
         else:
             if is_sha1:
-                branch = self.upstream
+                branch = upstream
             if branch is not None and branch.strip():
                 if not branch.startswith("refs/"):
                     branch = R_HEADS + branch
@@ -2935,7 +3688,8 @@ class Project:
             # got what we wanted, else trigger a second run of all
             # refs.
             if not self._CheckForImmutableRevision(
-                use_superproject=use_superproject
+                use_superproject=use_superproject,
+                depth=depth,
             ):
                 # Sync the current branch only with depth set to None.
                 # We always pass depth=None down to avoid infinite recursion.
@@ -3213,14 +3967,193 @@ class Project:
         if GitCommand(self, cmd).Wait() != 0:
             raise GitError(f"{self.name} rebase {upstream} ", project=self.name)
 
-    def _FastForward(self, head, ffonly=False, quiet=True):
-        cmd = ["merge", "--no-stat", head]
-        if ffonly:
-            cmd.append("--ff-only")
+    def _FastForward(self, head: str, quiet: bool = True) -> None:
+        cmd = ["merge", "--no-stat", "--ff-only"]
         if quiet:
             cmd.append("-q")
+        cmd.append(head)
         if GitCommand(self, cmd).Wait() != 0:
-            raise GitError(f"{self.name} merge {head} ", project=self.name)
+            raise GitError(
+                f"{self.name} merge --ff-only {head}", project=self.name
+            )
+
+    def _ReprojectCheckout(
+        self, revid: str, head: Optional[str], verbose: bool = False
+    ) -> None:
+        """Detach HEAD at |revid| with repo.reprojectcmd.
+
+        This stands in for `git checkout <revid>`. |head| is the commit HEAD
+        names now, or None. The command is not run when that is already
+        |revid|, since there is then nothing to materialize.
+        """
+        old = self._GetHead()
+        if old and old.startswith(R_HEADS):
+            old = old[len(R_HEADS) :]
+        if head != revid:
+            self._Reproject(revid, verbose=verbose)
+        self.work_git.DetachHead(
+            revid, message=f"checkout: moving from {old or revid} to {revid}"
+        )
+
+    def _ReprojectBranch(
+        self,
+        revid: str,
+        head: Optional[str],
+        message: str,
+        verbose: bool = False,
+    ) -> None:
+        """Move the checked out branch to |revid| with repo.reprojectcmd.
+
+        This stands in for a fast-forward merge or a hard reset. |head| is the
+        commit the branch is at; the ref write fails if it moved meanwhile.
+        """
+        self._Reproject(revid, verbose=verbose)
+        self.work_git.UpdateRef(HEAD, revid, old=head, message=message)
+
+    def _Reproject(self, revid: str, verbose: bool = False) -> None:
+        """Make the index and worktree match |revid| with repo.reprojectcmd.
+
+        The command stands in for the tree materialization of a checkout, a
+        fast-forward or a hard reset. It must leave every ref alone; the
+        caller writes the ref Git would have written.
+
+        For the contract the command has to honor, see docs/reproject-cmd.md.
+
+        Raises:
+            LocalSyncFail: An operation is in progress, the index has staged
+                changes, the command failed, or it left the project in a state
+                that breaks the contract.
+        """
+        in_progress = self._OperationInProgress()
+        if in_progress:
+            raise LocalSyncFail(
+                f"{in_progress} in progress; reprojectcmd cannot run",
+                project=self.name,
+            )
+
+        try:
+            head_tree = self.work_git.rev_parse(
+                "-q", "--verify", "HEAD^{tree}", log_as_error=False
+            )
+        except GitError:
+            head_tree = None
+
+        if head_tree:
+            p = GitCommand(
+                self,
+                ["diff-index", "-z", "--cached", "--name-only", head_tree],
+                capture_stdout=True,
+                capture_stderr=True,
+            )
+            if p.Wait() != 0:
+                raise LocalSyncFail(
+                    f"cannot check the index for staged changes: "
+                    f"{p.stderr.strip()}",
+                    project=self.name,
+                )
+            staged = p.stdout.split("\0")[:-1]
+        else:
+            p = GitCommand(
+                self,
+                ["ls-files", "-z", "--cached"],
+                capture_stdout=True,
+                capture_stderr=True,
+            )
+            if p.Wait() != 0:
+                raise LocalSyncFail(
+                    f"cannot check the index for staged changes: "
+                    f"{p.stderr.strip()}",
+                    project=self.name,
+                )
+            staged = p.stdout.split("\0")[:-1]
+
+        if staged:
+            raise LocalSyncFail(
+                "reprojectcmd cannot run with staged changes:\n"
+                + _FirstLines(staged),
+                project=self.name,
+            )
+
+        head = self.work_git.GetHead()
+        try:
+            head_oid = self.work_git.rev_parse(
+                "-q", "--verify", "HEAD", log_as_error=False
+            )
+        except GitError:
+            head_oid = None
+
+        env = os.environ.copy()
+        env.update(self.GetEnvVars())
+        env["REPO_TREV"] = revid
+        cmd_str = self.manifest.manifestProject.reproject_cmd
+        if verbose:
+            print(f"Running reprojectcmd: {cmd_str} for {self.name}")
+
+        output = None if verbose else subprocess.PIPE
+        try:
+            p = subprocess.run(
+                cmd_str,
+                shell=True,
+                cwd=self.manifest.topdir,
+                env=env,
+                stdout=output,
+                stderr=None if verbose else subprocess.STDOUT,
+                text=True,
+            )
+        except OSError as e:
+            raise LocalSyncFail(
+                f"failed to run reprojectcmd: {e}", project=self.name
+            )
+        if p.returncode != 0:
+            msg = f"reprojectcmd exited with {p.returncode}"
+            if p.stdout:
+                msg += ":\n" + p.stdout.rstrip()
+            raise LocalSyncFail(msg, project=self.name)
+
+        new_head = self.work_git.GetHead()
+        try:
+            new_head_oid = self.work_git.rev_parse(
+                "-q", "--verify", "HEAD", log_as_error=False
+            )
+        except GitError:
+            new_head_oid = None
+
+        if new_head != head or new_head_oid != head_oid:
+            from_desc = (
+                f"{head} ({head_oid})"
+                if head_oid and head != head_oid
+                else f"{head}"
+            )
+            to_desc = (
+                f"{new_head} ({new_head_oid})"
+                if new_head_oid and new_head != new_head_oid
+                else f"{new_head}"
+            )
+            raise LocalSyncFail(
+                f"reprojectcmd moved HEAD from {from_desc} to {to_desc}; repo "
+                "owns every ref write",
+                project=self.name,
+            )
+
+        p = GitCommand(
+            self,
+            ["diff-index", "--cached", "--name-only", f"{revid}^{{tree}}"],
+            capture_stdout=True,
+            capture_stderr=True,
+        )
+        if p.Wait() != 0:
+            raise LocalSyncFail(
+                f"cannot compare the index against {revid}: "
+                f"{p.stderr.strip()}",
+                project=self.name,
+            )
+        mismatched = p.stdout.splitlines()
+        if mismatched:
+            raise LocalSyncFail(
+                f"reprojectcmd left the index different from {revid}:\n"
+                + _FirstLines(mismatched),
+                project=self.name,
+            )
 
     def _InitGitDir(self, mirror_git=None, force_sync=False, quiet=False):
         # Prefix for temporary directories created during gitdir initialization.
@@ -3673,7 +4606,11 @@ class Project:
             self._MigrateOldSubmoduleDir()
 
         # If using an old layout style (a directory), migrate it.
-        if not platform_utils.islink(dotgit) and platform_utils.isdir(dotgit):
+        if (
+            not platform_utils.islink(dotgit)
+            and platform_utils.isdir(dotgit)
+            and not self.manifest.UseLocalGitDirs
+        ):
             self._MigrateOldWorkTreeGitDir(dotgit, project=self.name)
 
         init_dotgit = not os.path.lexists(dotgit)
@@ -3722,6 +4659,11 @@ class Project:
         For submodule projects, create a '.git' file using the gitfile
         mechanism, and for the rest, create a symbolic link.
         """
+        if self.manifest.UseLocalGitDirs and os.path.normpath(
+            self.gitdir
+        ) == os.path.normpath(dotgit):
+            return
+
         os.makedirs(self.worktree, exist_ok=True)
         if self.parent:
             _lwrite(
@@ -4064,8 +5006,52 @@ class Project:
 
             return dotgit if subpath is None else os.path.join(dotgit, subpath)
 
+        @staticmethod
+        def _ParseHead(line: str) -> Optional[str]:
+            """Parse the content of a .git/HEAD file.
+
+            Handles both symbolic refs (e.g. 'ref: refs/heads/...') and raw
+            commit IDs (40-hex SHA-1 or 64-hex SHA-256).
+
+            Returns:
+                The ref name (e.g. 'refs/heads/main') or lowercase commit hash
+                if valid, or None if empty or invalid.
+            """
+            line = line.strip()
+            if line.startswith("ref:"):
+                ref = line[4:].strip()
+                # Ensure the ref is not empty, pure whitespace, or the
+                # "refs/heads/.invalid" placeholder used for unborn branches,
+                # empty repositories, or when the reftables backend is used
+                # (which will be the default in Git 3.0).
+                if not ref or ref == R_HEADS + ".invalid":
+                    return None
+                return ref
+            else:
+                # Normalize commit IDs to canonical lowercase hexadecimal,
+                # matching the output format of `git rev-parse`.
+                line_lower = line.lower()
+                if IsId(line_lower):
+                    return line_lower
+            return None
+
         def GetHead(self):
             """Return the ref that HEAD points to."""
+            path = None
+            try:
+                # Catch AssertionError raised by GetDotgitPath when worktree
+                # .git pointer file is malformed (e.g. missing 'gitdir:').
+                path = self.GetDotgitPath(subpath=HEAD)
+                if not platform_utils.islink(path):
+                    with open(
+                        path, "r", encoding="utf-8", errors="replace"
+                    ) as fd:
+                        ref = self._ParseHead(fd.readline())
+                    if ref:
+                        return ref
+            except (OSError, AssertionError):
+                pass
+
             try:
                 return self.symbolic_ref("-q", HEAD, log_as_error=False)
             except GitError:
@@ -4085,19 +5071,37 @@ class Project:
 
                 # Fallback to direct file reading for compatibility with broken
                 # repos, e.g. if HEAD points to an unborn branch.
-                path = self.GetDotgitPath(subpath=HEAD)
+                if not path:
+                    raise NoManifestException(
+                        self._project.RelPath(local=False), str(e)
+                    )
                 try:
-                    with open(path) as fd:
-                        line = fd.readline()
+                    with open(
+                        path, "r", encoding="utf-8", errors="replace"
+                    ) as fd:
+                        ref = self._ParseHead(fd.readline())
                 except OSError:
-                    raise NoManifestException(path, str(e))
-                try:
-                    line = line.decode()
-                except AttributeError:
-                    pass
-                if line.startswith("ref: "):
-                    return line[5:-1]
-                return line[:-1]
+                    raise NoManifestException(
+                        self._project.RelPath(local=False), str(e)
+                    )
+                if not ref:
+                    raise NoManifestException(
+                        self._project.RelPath(local=False), str(e)
+                    )
+                return ref
+
+        def ResolveCommit(self, revision: str) -> str:
+            """Resolve |revision| to a commit without option ambiguity."""
+            cmdv = ["--verify", "--quiet"]
+            if git_require((2, 30, 0)):
+                cmdv.append("--end-of-options")
+            elif revision.startswith("-"):
+                raise GitError(
+                    f"invalid revision: {revision}",
+                    project=self._project.name,
+                )
+            cmdv.append(f"{revision}^{{commit}}")
+            return self.rev_parse(*cmdv, log_as_error=False)
 
         def SetHead(self, ref, message=None):
             cmdv = []
@@ -4261,7 +5265,7 @@ class _Later:
             if not self.quiet:
                 out.nl()
             return True
-        except GitError as e:
+        except (GitError, LocalSyncFail) as e:
             syncbuf.fail(self.project, e)
             out.nl()
             return False
@@ -4357,6 +5361,28 @@ class SyncBuffer:
         self._pending_failures = []
 
 
+@functools.lru_cache(maxsize=None)
+def _DefaultBranchFallback() -> str:
+    """Return the ref to use when remote default branch can't be resolved."""
+
+    def _git(args: List[str]) -> str:
+        p = GitCommand(
+            None,
+            args,
+            capture_stdout=True,
+            capture_stderr=True,
+            log_as_error=False,
+        )
+        return p.stdout.strip() if p.Wait() == 0 else ""
+
+    branch = ""
+    if git_require((2, 35, 0)):
+        branch = _git(["var", "GIT_DEFAULT_BRANCH"])
+    if not branch:
+        branch = _git(["config", "--get", "init.defaultBranch"])
+    return f"refs/heads/{branch or 'master'}"
+
+
 class MetaProject(Project):
     """A special project housed under .repo."""
 
@@ -4370,7 +5396,7 @@ class MetaProject(Project):
             worktree=worktree,
             remote=RemoteSpec("origin"),
             relpath=".repo/%s" % name,
-            revisionExpr="refs/heads/master",
+            revisionExpr=_DefaultBranchFallback(),
             revisionId=None,
             groups=None,
         )
@@ -4384,6 +5410,39 @@ class MetaProject(Project):
                     self.revisionExpr = base
                     self.revisionId = None
 
+    def _UseSuperprojectForUpstream(
+        self, use_superproject: Optional[bool] = None
+    ) -> bool:
+        # MetaProjects (the manifest repo and repo itself) never
+        # participate in a superproject relationship. Returning False
+        # here also avoids loading the manifest during `repo init`,
+        # before manifest.xml has been linked into .repo/.
+        return False
+
+    def _GetUpstreamFallback(self) -> Optional[str]:
+        # MetaProjects (the manifest repo and repo itself) do not have
+        # defaults in a manifest. Returning None here also avoids
+        # loading the manifest during `repo init`, before manifest.xml
+        # has been linked into .repo/.
+        return None
+
+    def _SharingProjectHasShallow(self) -> bool:
+        # MetaProjects (the manifest repo and repo itself) are never
+        # shared with other projects in the manifest. Returning False
+        # here also avoids loading the manifest during `repo init`,
+        # before manifest.xml has been linked into .repo/.
+        return False
+
+    def _ShouldVerifyUpstream(
+        self,
+        use_superproject: Optional[bool] = None,
+        depth: Optional[int] = None,
+    ) -> bool:
+        """MetaProjects (manifest repo and repo itself) do not verify upstream
+        ancestry.
+        """
+        return False
+
     @property
     def HasChanges(self):
         """Has the remote received new commits not yet checked out?"""
@@ -4392,8 +5451,8 @@ class MetaProject(Project):
 
         all_refs = self.bare_ref.all
         revid = self.GetRevisionId(all_refs)
-        head = self.work_git.GetHead()
-        if head.startswith(R_HEADS):
+        head = self._GetHead()
+        if head and head.startswith(R_HEADS):
             try:
                 head = all_refs[head]
             except KeyError:
@@ -4401,7 +5460,7 @@ class MetaProject(Project):
 
         if revid == head:
             return False
-        elif self._revlist(not_rev(HEAD), revid):
+        elif self._revlist("-1", not_rev(HEAD), revid):
             return True
         return False
 
@@ -4474,6 +5533,21 @@ class ManifestProject(MetaProject):
     def use_worktree(self):
         """Whether we use worktree."""
         return self.config.GetBoolean("repo.worktree")
+
+    @property
+    def use_local_gitdirs(self):
+        """Whether we use local gitdirs."""
+        return self.config.GetBoolean("repo.uselocalgitdirs")
+
+    @property
+    def fetch_cmd(self):
+        """The fetch command to use."""
+        return self.config.GetString("repo.fetchcmd")
+
+    @property
+    def reproject_cmd(self) -> Optional[str]:
+        """The command that materializes a project's tree instead of Git."""
+        return self.config.GetString("repo.reprojectcmd")
 
     @property
     def clone_bundle(self):
@@ -4629,6 +5703,7 @@ class ManifestProject(MetaProject):
         this_manifest_only=False,
         outer_manifest=True,
         clone_filter_for_depth=None,
+        use_local_gitdirs=False,
     ):
         """Sync the manifest and all submanifests.
 
@@ -4808,9 +5883,9 @@ class ManifestProject(MetaProject):
                 if is_new:
                     default_branch = self.ResolveRemoteHead()
                     if default_branch is None:
-                        # If the remote doesn't have HEAD configured, default to
-                        # master.
-                        default_branch = "refs/heads/master"
+                        # If the remote doesn't have HEAD configured, fall back
+                        # to whatever git uses as its default branch.
+                        default_branch = _DefaultBranchFallback()
                     self.revisionExpr = default_branch
                 else:
                     self.PreSync()
@@ -4858,6 +5933,50 @@ class ManifestProject(MetaProject):
             if is_new:
                 self.use_git_worktrees = True
             logger.warning("warning: --worktree is experimental!")
+
+        if use_local_gitdirs:
+            if mirror:
+                logger.error(
+                    "fatal: --mirror and --use-local-gitdirs are incompatible"
+                )
+                return False
+
+            if worktree:
+                logger.error(
+                    "fatal: --worktree and --use-local-gitdirs are incompatible"
+                )
+                return False
+
+            if archive:
+                logger.error(
+                    "fatal: --archive and --use-local-gitdirs are incompatible"
+                )
+                return False
+
+            if not is_new and not self.use_local_gitdirs:
+                logger.error(
+                    "fatal: --use-local-gitdirs is only supported when "
+                    "initializing a new workspace."
+                )
+                return False
+
+            self.config.SetBoolean("repo.uselocalgitdirs", use_local_gitdirs)
+
+        if self.fetch_cmd and not (use_local_gitdirs or self.use_local_gitdirs):
+            logger.error(
+                "fatal: repo.fetchcmd is set but repo.uselocalgitdirs is "
+                "not enabled"
+            )
+            return False
+
+        if self.reproject_cmd and not (
+            use_local_gitdirs or self.use_local_gitdirs
+        ):
+            logger.error(
+                "fatal: repo.reprojectcmd is set but repo.uselocalgitdirs is "
+                "not enabled"
+            )
+            return False
 
         if archive:
             if is_new:
