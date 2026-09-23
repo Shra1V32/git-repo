@@ -47,7 +47,7 @@ from error import (
     RepoError,
     UploadError,
 )
-from git_command import GitCommand, GitRequireError, git_require
+from git_command import GitCommand, git_require
 from git_config import GetSchemeFromUrl, GetUrlCookieFile, GitConfig, IsId
 from git_refs import HEAD, R_HEADS, R_M, R_PUB, R_TAGS, R_WORKTREE_M, GitRefs
 from git_trace2_event_log import EventLog
@@ -1408,35 +1408,6 @@ class Project:
                 # Let _InitGitDir fix the issue, force_sync is always True here.
                 self._InitGitDir(force_sync=True, quiet=quiet)
         self._InitRemote()
-
-        if not is_new:
-            # After init remote, Check for the cookiefiles
-            cookiefile = GitConfig.ForUser().GetString("http.cookiefile")
-            if not cookiefile:
-                raise GitRequireError(
-                    f"""
-            ==================================================================
-                ERROR: Missing Cookiefile for android.googlesource.com
-            ==================================================================
-
-            It appears that no cookiefile has been configured in your Git settings
-            for authenticating with android.googlesource.com. This file is essential
-            for secure communication and access.
-
-            Please follow these detailed steps to resolve the issue:
-
-                1. Visit the URL below in your browser to generate the required password
-                credentials:
-                https://android.googlesource.com
-
-                2. Execute the initialization script appropriate for your shell environment
-                (bash or zsh) in your terminal to finalize the setup.
-
-                3. Once the above steps are completed, please run 'repo sync' again.
-
-            ==================================================================
-                    """
-                )
 
         if self.UseAlternates:
             # If gitdir/objects is a symlink, migrate it from the old layout.
@@ -5073,35 +5044,6 @@ class ManifestProject(MetaProject):
                 )
                 if sync_result.fatal and use_superproject is not None:
                     return False
-
-        if is_new:
-            # Check git cookies
-            cookiefile = GitConfig.ForUser().GetString("http.cookiefile")
-            if not cookiefile:
-                raise GitRequireError(
-                    f"""
-        ==================================================================
-            ERROR: Missing Cookiefile for android.googlesource.com
-        ==================================================================
-
-        It appears that no cookiefile has been configured in your Git settings
-        for authenticating with android.googlesource.com. This file is essential
-        for secure communication and access.
-
-        Please follow these detailed steps to resolve the issue:
-
-            1. Visit the URL below in your browser to generate the required password
-            credentials:
-            https://android.googlesource.com
-
-            2. Execute the initialization script appropriate for your shell environment
-            (bash or zsh) in your terminal to finalize the setup.
-
-            3. Once the above steps are completed, please run 'repo sync' again.
-
-        ==================================================================
-                """
-                )
 
         return True
 
