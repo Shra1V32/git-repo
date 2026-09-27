@@ -104,9 +104,11 @@ class Trace(contextlib.ContextDecorator):
             f"PID: {os.getpid()} START: {self._time()} :{self._trace_msg}\n"
         )
 
-        with open(_TRACE_FILE, "a") as f:
-            print(print_msg, file=f)
-
+        try:
+            with open(_TRACE_FILE, "a") as f:
+                print(print_msg, file=f)
+        except OSError:
+            pass
         if _TRACE_TO_STDERR:
             print(print_msg, file=sys.stderr)
 
@@ -120,9 +122,11 @@ class Trace(contextlib.ContextDecorator):
             f"PID: {os.getpid()} END: {self._time()} :{self._trace_msg}\n"
         )
 
-        with open(_TRACE_FILE, "a") as f:
-            print(print_msg, file=f)
-
+        try:
+            with open(_TRACE_FILE, "a") as f:
+                print(print_msg, file=f)
+        except OSError:
+            pass
         if _TRACE_TO_STDERR:
             print(print_msg, file=sys.stderr)
 

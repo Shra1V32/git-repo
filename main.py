@@ -600,20 +600,35 @@ class _Repo:
                         file=sys.stderr,
                     )
 
-            cmd.event_log.FinishEvent(
-                cmd_event, finish, result is None or result == 0
-            )
-            git_trace2_event_log.DefParamRepoEvents(
-                cmd.manifest.manifestProject.config.DumpConfigDict()
-            )
-            git_trace2_event_log.ExitEvent(result)
+            try:
+                cmd.event_log.FinishEvent(
+                    cmd_event, finish, result is None or result == 0
+                )
+            except Exception:
+                pass
+            try:
+                git_trace2_event_log.DefParamRepoEvents(
+                    cmd.manifest.manifestProject.config.DumpConfigDict()
+                )
+            except Exception:
+                pass
+            try:
+                git_trace2_event_log.ExitEvent(result)
+            except Exception:
+                pass
 
             if gopts.event_log:
-                cmd.event_log.Write(
-                    os.path.abspath(os.path.expanduser(gopts.event_log))
-                )
+                try:
+                    cmd.event_log.Write(
+                        os.path.abspath(os.path.expanduser(gopts.event_log))
+                    )
+                except Exception:
+                    pass
 
-            git_trace2_event_log.Write(gopts.git_trace2_event_log)
+            try:
+                git_trace2_event_log.Write(gopts.git_trace2_event_log)
+            except Exception:
+                pass
         return result
 
 
