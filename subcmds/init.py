@@ -353,8 +353,17 @@ to update the working directory files.
             if args:
                 self.OptionParser.error("too many arguments to init")
 
+    def _CheckHomeInit(self, opt):
+        wrapper = Wrapper()
+        if hasattr(wrapper, "_CheckHomeInit"):
+            topdir = getattr(getattr(self, "manifest", None), "topdir", None)
+            return wrapper._CheckHomeInit(opt, topdir=topdir)
+        return True
+
     def Execute(self, opt, args):
         wrapper = Wrapper()
+        if not self._CheckHomeInit(opt):
+            return 1
 
         reqs = wrapper.Requirements.from_dir(WrapperDir())
         git_require(reqs.get_hard_ver("git"), fail=True)

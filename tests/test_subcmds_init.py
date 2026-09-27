@@ -58,3 +58,26 @@ def test_cli_parser_bad(argv: List[str]) -> None:
     opts, args = cmd.OptionParser.parse_args(argv)
     with pytest.raises(SystemExit):
         cmd.ValidateOptions(opts, args)
+
+
+@pytest.mark.parametrize(
+    "argv, expected_yes",
+    (
+        ([], False),
+        (["-y"], True),
+        (["--yes"], True),
+    ),
+)
+def test_cli_parser_yes(argv: List[str], expected_yes: bool) -> None:
+    """Check -y and --yes command line options."""
+    cmd = init.Init()
+    opts, _ = cmd.OptionParser.parse_args(argv)
+    assert opts.yes is expected_yes
+
+
+def test_execute_aborts_when_home_init_declined(monkeypatch) -> None:
+    """Check Execute returns 1 if home directory initialization is declined."""
+    cmd = init.Init()
+    opts, args = cmd.OptionParser.parse_args([])
+    monkeypatch.setattr(cmd, "_CheckHomeInit", lambda opt: False)
+    assert cmd.Execute(opts, args) == 1

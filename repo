@@ -266,6 +266,13 @@ def InitParser(parser):
         action="store_false",
         help="only show errors",
     )
+    parser.add_option(
+        "-y",
+        "--yes",
+        action="store_true",
+        default=False,
+        help="answer yes to all safe prompts",
+    )
 
     # Manifest.
     group = parser.add_option_group("Manifest options")
@@ -598,6 +605,81 @@ def check_repo_rev(dst, rev, repo_verify=True, quiet=False):
         rev = local_rev
     return (remote_ref, rev)
 
+def _IsHomeDir(path=None):
+    """Check if the given path (or cwd) is directly the user's home directory."""
+    if path is None:
+        path = os.getcwd()
+    try:
+        cur = os.path.abspath(path)
+        for home_candidate in (os.path.expanduser("~"), os.environ.get("HOME")):
+            if not home_candidate or home_candidate == "~":
+                continue
+            home = os.path.abspath(home_candidate)
+            if cur == home:
+                return True
+            if os.path.exists(home) and os.path.exists(cur):
+                try:
+                    if os.path.samefile(cur, home):
+                        return True
+                except (OSError, ValueError):
+                    pass
+            if os.path.realpath(cur) == os.path.realpath(home):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _CheckHomeInit(opt=None, topdir=None):
+    """Warn and prompt the user if attempting to initialize repo directly under $HOME."""
+    target_dirs = []
+    if topdir:
+        target_dirs.append(topdir)
+    target_dirs.append(os.getcwd())
+
+    if not any(_IsHomeDir(d) for d in target_dirs):
+        return True
+
+    # If already confirmed (e.g. from launcher to main.py), allow it.
+    if os.environ.get("REPO_INIT_HOME_CONFIRMED") == "1":
+        return True
+
+    # Check for bypass flag if opt has 'yes'
+    if opt and getattr(opt, "yes", False):
+        _setenv("REPO_INIT_HOME_CONFIRMED", "1")
+        return True
+
+    home_path = os.environ.get("HOME") or os.path.expanduser("~")
+    print(
+        f"\nrepo: warning: Initializing repo directly in your home directory ({home_path}) is not recommended.\n"
+        f"This will create a '.repo' directory in $HOME and syncing will checkout repositories\n"
+        f"directly into your home directory, which may overwrite or clutter your personal files.\n"
+        f"To avoid this, create a dedicated project directory (e.g. 'mkdir ~/workspace && cd ~/workspace')\n"
+        f"and run 'repo init' there.\n",
+        file=sys.stderr,
+    )
+
+    try:
+        answer = (
+            input("Are you sure you want to initialize repo in $HOME [y/N]? ")
+            .strip()
+            .lower()
+        )
+    except (KeyboardInterrupt, EOFError):
+        print("\nrepo: initialization aborted.", file=sys.stderr)
+        return False
+
+    if answer in ("y", "yes"):
+        _setenv("REPO_INIT_HOME_CONFIRMED", "1")
+        return True
+
+    print("repo: initialization aborted.", file=sys.stderr)
+    return False
+
+
+CheckHomeInit = _CheckHomeInit
+IsHomeDir = _IsHomeDir
+
 
 def _Init(args):
     """Installs repo by cloning it over the network."""
@@ -611,6 +693,8 @@ def _Init(args):
             sys.exit(1)
     opt.quiet = opt.output_mode is False
     opt.verbose = opt.output_mode is True
+    if not _CheckHomeInit(opt):
+        sys.exit(1)
 
     if opt.clone_bundle is None:
         opt.clone_bundle = False if opt.partial_clone else True

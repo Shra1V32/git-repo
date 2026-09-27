@@ -117,6 +117,132 @@ class TestRepoWrapper:
         opts, args = parser.parse_args([])
         assert args == []
         assert opts.manifest_url is None
+        assert opts.yes is False
+
+    def test_init_parser_yes(self, repo_wrapper: wrapper.Wrapper) -> None:
+        """Make sure 'init' GetParser parses -y and --yes."""
+        parser = repo_wrapper.GetParser()
+        opts, _ = parser.parse_args(["-y"])
+        assert opts.yes is True
+        opts, _ = parser.parse_args(["--yes"])
+        assert opts.yes is True
+
+    def test_is_home_dir(self, repo_wrapper: wrapper.Wrapper, monkeypatch, tmp_path) -> None:
+        """Check _IsHomeDir logic."""
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        sub_dir = fake_home / "project"
+        sub_dir.mkdir()
+        other_dir = tmp_path / "other"
+        other_dir.mkdir()
+
+        monkeypatch.setenv("HOME", str(fake_home))
+        monkeypatch.setattr(os.path, "expanduser", lambda path: str(fake_home) if path == "~" else path)
+
+        assert repo_wrapper._IsHomeDir(str(fake_home)) is True
+        assert repo_wrapper._IsHomeDir(str(fake_home) + "/") is True
+        assert repo_wrapper._IsHomeDir(str(sub_dir)) is False
+        assert repo_wrapper._IsHomeDir(str(other_dir)) is False
+
+    def test_check_home_init_not_home(self, repo_wrapper: wrapper.Wrapper, monkeypatch, tmp_path) -> None:
+        """Check _CheckHomeInit passes without prompt when not under HOME."""
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+
+        monkeypatch.setenv("HOME", str(fake_home))
+        monkeypatch.setattr(os.path, "expanduser", lambda path: str(fake_home) if path == "~" else path)
+        monkeypatch.chdir(work_dir)
+
+        opt = mock.Mock(yes=False)
+        # Should succeed without calling input
+        assert repo_wrapper._CheckHomeInit(opt) is True
+
+    def test_check_home_init_with_yes_flag(self, repo_wrapper: wrapper.Wrapper, monkeypatch, tmp_path) -> None:
+        """Check _CheckHomeInit passes without prompt when --yes is specified."""
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+
+        monkeypatch.setenv("HOME", str(fake_home))
+        monkeypatch.setattr(os.path, "expanduser", lambda path: str(fake_home) if path == "~" else path)
+        monkeypatch.delenv("REPO_INIT_HOME_CONFIRMED", raising=False)
+        monkeypatch.chdir(fake_home)
+
+        opt = mock.Mock(yes=True)
+        assert repo_wrapper._CheckHomeInit(opt) is True
+        assert os.environ.get("REPO_INIT_HOME_CONFIRMED") == "1"
+
+    def test_check_home_init_with_confirmed_env(self, repo_wrapper: wrapper.Wrapper, monkeypatch, tmp_path) -> None:
+        """Check _CheckHomeInit passes without prompt when REPO_INIT_HOME_CONFIRMED=1."""
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+
+        monkeypatch.setenv("HOME", str(fake_home))
+        monkeypatch.setattr(os.path, "expanduser", lambda path: str(fake_home) if path == "~" else path)
+        monkeypatch.setenv("REPO_INIT_HOME_CONFIRMED", "1")
+        monkeypatch.chdir(fake_home)
+
+        opt = mock.Mock(yes=False)
+        assert repo_wrapper._CheckHomeInit(opt) is True
+
+    @pytest.mark.parametrize("user_input", ("y", "yes", "Y", "YES"))
+    def test_check_home_init_user_accepts(self, repo_wrapper: wrapper.Wrapper, monkeypatch, tmp_path, user_input) -> None:
+        """Check _CheckHomeInit accepts when user confirms."""
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+
+        monkeypatch.setenv("HOME", str(fake_home))
+        monkeypatch.setattr(os.path, "expanduser", lambda path: str(fake_home) if path == "~" else path)
+        monkeypatch.delenv("REPO_INIT_HOME_CONFIRMED", raising=False)
+        monkeypatch.chdir(fake_home)
+        monkeypatch.setattr("builtins.input", lambda prompt: user_input)
+
+        opt = mock.Mock(yes=False)
+        assert repo_wrapper._CheckHomeInit(opt) is True
+        assert os.environ.get("REPO_INIT_HOME_CONFIRMED") == "1"
+
+    @pytest.mark.parametrize("user_input", ("n", "no", "", "anything"))
+    def test_check_home_init_user_declines(self, repo_wrapper: wrapper.Wrapper, monkeypatch, tmp_path, user_input) -> None:
+        """Check _CheckHomeInit rejects when user declines or hits enter."""
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+
+        monkeypatch.setenv("HOME", str(fake_home))
+        monkeypatch.setattr(os.path, "expanduser", lambda path: str(fake_home) if path == "~" else path)
+        monkeypatch.delenv("REPO_INIT_HOME_CONFIRMED", raising=False)
+        monkeypatch.chdir(fake_home)
+        monkeypatch.setattr("builtins.input", lambda prompt: user_input)
+
+        opt = mock.Mock(yes=False)
+        assert repo_wrapper._CheckHomeInit(opt) is False
+        assert os.environ.get("REPO_INIT_HOME_CONFIRMED") is None
+
+    @pytest.mark.parametrize("exc", (KeyboardInterrupt, EOFError))
+    def test_check_home_init_interrupted(self, repo_wrapper: wrapper.Wrapper, monkeypatch, tmp_path, exc) -> None:
+        """Check _CheckHomeInit rejects on KeyboardInterrupt or EOFError."""
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+
+        monkeypatch.setenv("HOME", str(fake_home))
+        monkeypatch.setattr(os.path, "expanduser", lambda path: str(fake_home) if path == "~" else path)
+        monkeypatch.delenv("REPO_INIT_HOME_CONFIRMED", raising=False)
+        monkeypatch.chdir(fake_home)
+
+        def raise_exc(prompt):
+            raise exc()
+
+        monkeypatch.setattr("builtins.input", raise_exc)
+
+        opt = mock.Mock(yes=False)
+        assert repo_wrapper._CheckHomeInit(opt) is False
+
+    def test_init_aborts_when_declined(self, repo_wrapper: wrapper.Wrapper, monkeypatch) -> None:
+        """Check _Init aborts with sys.exit(1) without creating directory when check fails."""
+        monkeypatch.setattr(repo_wrapper, "_CheckHomeInit", lambda opt: False)
+        with pytest.raises(SystemExit) as e:
+            repo_wrapper._Init([])
+        assert e.value.code == 1
 
 
 class TestSetGitTrace2ParentSid:
