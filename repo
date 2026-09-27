@@ -650,30 +650,39 @@ def _CheckHomeInit(opt=None, topdir=None):
         return True
 
     home_path = os.environ.get("HOME") or os.path.expanduser("~")
+    # ANSI escape sequences for color
+    yellow_bold = "\033[1;93m"
+    yellow = "\033[93m"
+    red_bold = "\033[1;91m"
+    bold = "\033[1m"
+    color_end = "\033[0m"
+
     print(
-        f"\nrepo: warning: Initializing repo directly in your home directory ({home_path}) is not recommended.\n"
+        f"\n{yellow_bold}repo: warning:{color_end} {yellow}Initializing repo directly in your home directory ({home_path}) is not recommended.\n"
         f"This will create a '.repo' directory in $HOME and syncing will checkout repositories\n"
         f"directly into your home directory, which may overwrite or clutter your personal files.\n"
         f"To avoid this, create a dedicated project directory (e.g. 'mkdir ~/workspace && cd ~/workspace')\n"
-        f"and run 'repo init' there.\n",
+        f"and run 'repo init' there.{color_end}\n",
         file=sys.stderr,
     )
 
     try:
         answer = (
-            input("Are you sure you want to initialize repo in $HOME [y/N]? ")
+            input(
+                f"{bold}Are you sure you want to initialize repo in $HOME [y/N]? {color_end}"
+            )
             .strip()
             .lower()
         )
     except (KeyboardInterrupt, EOFError):
-        print("\nrepo: initialization aborted.", file=sys.stderr)
+        print(f"\n{red_bold}repo: initialization aborted.{color_end}", file=sys.stderr)
         return False
 
     if answer in ("y", "yes"):
         _setenv("REPO_INIT_HOME_CONFIRMED", "1")
         return True
 
-    print("repo: initialization aborted.", file=sys.stderr)
+    print(f"{red_bold}repo: initialization aborted.{color_end}", file=sys.stderr)
     return False
 
 
