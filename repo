@@ -630,6 +630,19 @@ def _IsHomeDir(path=None):
     return False
 
 
+def _CleanHomeRepo(target_dirs=None):
+    """Remove .repo from home directory if it exists."""
+    if target_dirs is None:
+        target_dirs = [os.getcwd()]
+    for d in target_dirs:
+        if d and _IsHomeDir(d):
+            r = os.path.join(d, repodir)
+            if os.path.exists(r):
+                shutil.rmtree(r, ignore_errors=True)
+            if os.path.exists(r + ".tmp"):
+                shutil.rmtree(r + ".tmp", ignore_errors=True)
+
+
 def _CheckHomeInit(opt=None, topdir=None):
     """Warn and prompt the user if attempting to initialize repo directly under $HOME."""
     target_dirs = []
@@ -658,11 +671,7 @@ def _CheckHomeInit(opt=None, topdir=None):
     color_end = "\033[0m"
 
     print(
-        f"\n{yellow_bold}repo: warning:{color_end} {yellow}Initializing repo directly in your home directory ({home_path}) is not recommended.\n"
-        f"This will create a '.repo' directory in $HOME and syncing will checkout repositories\n"
-        f"directly into your home directory, which may overwrite or clutter your personal files.\n"
-        f"To avoid this, create a dedicated project directory (e.g. 'mkdir ~/workspace && cd ~/workspace')\n"
-        f"and run 'repo init' there.{color_end}\n",
+        f"{yellow_bold}repo: warning:{color_end} {yellow}Initializing directly in $HOME ({home_path}) can clutter your home directory with repositories.{color_end}",
         file=sys.stderr,
     )
 
@@ -675,6 +684,7 @@ def _CheckHomeInit(opt=None, topdir=None):
             .lower()
         )
     except (KeyboardInterrupt, EOFError):
+        _CleanHomeRepo(target_dirs)
         print(f"\n{red_bold}repo: initialization aborted.{color_end}", file=sys.stderr)
         return False
 
@@ -682,12 +692,15 @@ def _CheckHomeInit(opt=None, topdir=None):
         _setenv("REPO_INIT_HOME_CONFIRMED", "1")
         return True
 
+    _CleanHomeRepo(target_dirs)
     print(f"{red_bold}repo: initialization aborted.{color_end}", file=sys.stderr)
     return False
 
 
 CheckHomeInit = _CheckHomeInit
 IsHomeDir = _IsHomeDir
+CleanHomeRepo = _CleanHomeRepo
+
 
 
 def _Init(args):
@@ -703,6 +716,7 @@ def _Init(args):
     opt.quiet = opt.output_mode is False
     opt.verbose = opt.output_mode is True
     if not _CheckHomeInit(opt):
+        _CleanHomeRepo([os.getcwd()])
         sys.exit(1)
 
     if opt.clone_bundle is None:
@@ -1507,6 +1521,14 @@ def main(orig_args):
                 _SetDefaultsTo(my_git)
             try:
                 _Init(args)
+            except KeyboardInterrupt:
+                if _IsHomeDir():
+                    _CleanHomeRepo([os.getcwd()])
+                print(
+                    f"\n\033[1;91mrepo: initialization aborted.\033[0m",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
             except CloneFailure:
                 path = os.path.join(repodir, S_repo)
                 print(
@@ -1516,6 +1538,8 @@ def main(orig_args):
                 )
                 shutil.rmtree(path, ignore_errors=True)
                 shutil.rmtree(path + ".tmp", ignore_errors=True)
+                if _IsHomeDir():
+                    _CleanHomeRepo([os.getcwd()])
                 sys.exit(1)
             repo_main, rel_repo_dir = _FindRepo()
         else:

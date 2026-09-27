@@ -357,7 +357,10 @@ to update the working directory files.
         wrapper = Wrapper()
         if hasattr(wrapper, "_CheckHomeInit"):
             topdir = getattr(getattr(self, "manifest", None), "topdir", None)
-            return wrapper._CheckHomeInit(opt, topdir=topdir)
+            res = wrapper._CheckHomeInit(opt, topdir=topdir)
+            if not res and hasattr(wrapper, "_CleanHomeRepo"):
+                wrapper._CleanHomeRepo([topdir, os.getcwd()])
+            return res
         return True
 
     def Execute(self, opt, args):

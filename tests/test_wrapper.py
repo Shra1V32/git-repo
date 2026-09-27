@@ -244,6 +244,67 @@ class TestRepoWrapper:
             repo_wrapper._Init([])
         assert e.value.code == 1
 
+    def test_clean_home_repo(self, repo_wrapper: wrapper.Wrapper, monkeypatch, tmp_path) -> None:
+        """Check _CleanHomeRepo only removes .repo in home directory."""
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        home_repo = fake_home / ".repo"
+        home_repo.mkdir()
+
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        work_repo = work_dir / ".repo"
+        work_repo.mkdir()
+
+        monkeypatch.setenv("HOME", str(fake_home))
+        monkeypatch.setattr(os.path, "expanduser", lambda path: str(fake_home) if path == "~" else path)
+
+        # Calling on fake_home should remove home_repo
+        repo_wrapper._CleanHomeRepo([str(fake_home)])
+        assert not home_repo.exists()
+
+        # Calling on work_dir should not remove work_repo
+        repo_wrapper._CleanHomeRepo([str(work_dir)])
+        assert work_repo.exists()
+
+    def test_check_home_init_cleanup_on_decline(self, repo_wrapper: wrapper.Wrapper, monkeypatch, tmp_path) -> None:
+        """Check _CheckHomeInit deletes .repo when user declines."""
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        home_repo = fake_home / ".repo"
+        home_repo.mkdir()
+
+        monkeypatch.setenv("HOME", str(fake_home))
+        monkeypatch.setattr(os.path, "expanduser", lambda path: str(fake_home) if path == "~" else path)
+        monkeypatch.delenv("REPO_INIT_HOME_CONFIRMED", raising=False)
+        monkeypatch.chdir(fake_home)
+        monkeypatch.setattr("builtins.input", lambda prompt: "n")
+
+        opt = mock.Mock(yes=False)
+        assert repo_wrapper._CheckHomeInit(opt) is False
+        assert not home_repo.exists()
+
+    def test_check_home_init_cleanup_on_ctrl_c(self, repo_wrapper: wrapper.Wrapper, monkeypatch, tmp_path) -> None:
+        """Check _CheckHomeInit deletes .repo on KeyboardInterrupt."""
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        home_repo = fake_home / ".repo"
+        home_repo.mkdir()
+
+        monkeypatch.setenv("HOME", str(fake_home))
+        monkeypatch.setattr(os.path, "expanduser", lambda path: str(fake_home) if path == "~" else path)
+        monkeypatch.delenv("REPO_INIT_HOME_CONFIRMED", raising=False)
+        monkeypatch.chdir(fake_home)
+
+        def raise_interrupt(prompt):
+            raise KeyboardInterrupt()
+
+        monkeypatch.setattr("builtins.input", raise_interrupt)
+
+        opt = mock.Mock(yes=False)
+        assert repo_wrapper._CheckHomeInit(opt) is False
+        assert not home_repo.exists()
+
 
 class TestSetGitTrace2ParentSid:
     """Check SetGitTrace2ParentSid behavior."""
