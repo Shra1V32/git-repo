@@ -887,8 +887,15 @@ class Project:
         ahead_behind: bool = False,
         show_stash: bool = False,
     ) -> Optional[git_status.StatusSnapshot]:
-        """Read one porcelain-v2 snapshot, or select the legacy path."""
+        """Read one porcelain-v2 snapshot, or select the legacy path.
+
+        Returns None on Git older than 2.11, when git status fails, or when
+        the worktree directory is missing. A missing worktree isn't logged:
+        status can't run there, and the legacy path raises its own error.
+        """
         if not git_require((2, 11, 0)):
+            return None
+        if not self.worktree or not platform_utils.isdir(self.worktree):
             return None
         try:
             return git_status.GetStatus(
@@ -944,7 +951,26 @@ class Project:
             if has_status_stash:
                 return bool(status.stash_count)
             return self.HasStash()
-        return self.IsDirty(consider_untracked=True) or self.HasStash()
+        # The snapshot already failed; don't run git status again.
+        return self._IsDirtyLegacy(consider_untracked=True) or self.HasStash()
+
+    def GetDirtyAndHead(self) -> Tuple[bool, Optional[str]]:
+        """Return whether the worktree is dirty, and the commit at HEAD.
+
+        Untracked files count as dirty. HEAD is None when it can't be
+        resolved, e.g. on an unborn branch. Both come from one status
+        snapshot when possible.
+        """
+        status = self._GetStatusSnapshot(untracked_files="normal", branch=True)
+        if status is not None:
+            return status.is_dirty(consider_untracked=True), status.branch_oid
+        # The snapshot already failed; don't run git status again.
+        is_dirty = self._IsDirtyLegacy(consider_untracked=True)
+        try:
+            head = self.work_git.rev_parse(HEAD)
+        except GitError:
+            head = None
+        return is_dirty, head
 
     _userident_name = None
     _userident_email = None
@@ -1640,6 +1666,12 @@ class Project:
         if the repository is clean and has no local-only state.
         """
         if not self.Exists:
+            return False
+
+        # Local changes can't be checked without a worktree, and pruning drops
+        # every reflog. Sync_LocalHalf() recreates the worktree, so a later
+        # sync can decide.
+        if not self.worktree or not platform_utils.isdir(self.worktree):
             return False
 
         if self._CheckForImmutableRevision(use_superproject=use_superproject):
@@ -3889,9 +3921,9 @@ class Project:
                     f"{self.name} cherry-pick {rev} ", project=self.name
                 )
 
-    def _LsRemote(self, refs):
+    def _LsRemote(self, refs: str) -> Optional[str]:
         cmd = ["ls-remote", self.remote.name, refs]
-        p = GitCommand(self, cmd, capture_stdout=True)
+        p = GitCommand(self, cmd, bare=True, capture_stdout=True)
         if p.Wait() == 0:
             return p.stdout
         return None

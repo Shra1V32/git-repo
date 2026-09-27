@@ -713,6 +713,18 @@ class ProjectTests(unittest.TestCase):
             ):
                 self.assertIsNone(proj._GetStatusSnapshot())
 
+    def test_get_status_snapshot_missing_worktree_is_quiet(self) -> None:
+        """A missing worktree skips git status without a warning."""
+        with utils_for_test.TempGitTree() as tempdir:
+            proj = _create_mock_project(tempdir)
+            proj.worktree = os.path.join(tempdir, "missing")
+            with mock.patch.object(git_status, "GetStatus") as mock_get_status:
+                with mock.patch.object(project, "logger") as mock_logger:
+                    self.assertIsNone(proj._GetStatusSnapshot())
+
+            mock_get_status.assert_not_called()
+            mock_logger.warning.assert_not_called()
+
     def test_dirty_or_stash_uses_status_stash_header(self) -> None:
         """A normal stash is detected without a second Git process."""
         with utils_for_test.TempGitTree() as tempdir:
@@ -755,6 +767,64 @@ class ProjectTests(unittest.TestCase):
                 untracked_files="normal", show_stash=False
             )
             proj.HasStash.assert_called_once_with()
+
+    def test_dirty_and_head_agree_across_status_paths(self) -> None:
+        """Porcelain v2 and legacy plumbing report the same state."""
+        with utils_for_test.TempGitTree() as tempdir:
+            proj = _create_mock_project(tempdir)
+
+            def check(expected: Tuple[bool, Optional[str]]) -> None:
+                for use_status in (True, False):
+                    with self.subTest(expected=expected, status=use_status):
+                        with mock.patch.object(
+                            project, "git_require", return_value=use_status
+                        ):
+                            self.assertEqual(expected, proj.GetDirtyAndHead())
+
+            check((False, None))
+            Path(tempdir, "untracked").write_text("new")
+            check((True, None))
+
+            Path(tempdir, "tracked").write_text("initial")
+            proj.work_git.add("tracked")
+            proj.work_git.commit("-m", "initial")
+            head = proj.work_git.rev_parse("HEAD")
+            check((True, head))
+            os.remove(os.path.join(tempdir, "untracked"))
+            check((False, head))
+
+    def test_dirty_and_head_fallback_skips_second_snapshot(self) -> None:
+        """A failed snapshot goes straight to the legacy plumbing."""
+        with utils_for_test.TempGitTree() as tempdir:
+            proj = _create_mock_project(tempdir)
+            proj._GetStatusSnapshot = mock.MagicMock(return_value=None)
+            proj._IsDirtyLegacy = mock.MagicMock(return_value=False)
+            proj.work_git = mock.MagicMock()
+            proj.work_git.rev_parse.return_value = "head"
+
+            self.assertEqual((False, "head"), proj.GetDirtyAndHead())
+
+            proj._GetStatusSnapshot.assert_called_once_with(
+                untracked_files="normal", branch=True
+            )
+            proj._IsDirtyLegacy.assert_called_once_with(consider_untracked=True)
+            proj.work_git.rev_parse.assert_called_once_with("HEAD")
+
+    def test_dirty_or_stash_fallback_skips_second_snapshot(self) -> None:
+        """A failed snapshot goes straight to the legacy dirty check."""
+        with utils_for_test.TempGitTree() as tempdir:
+            proj = _create_mock_project(tempdir)
+            proj._GetStatusSnapshot = mock.MagicMock(return_value=None)
+            proj._IsDirtyLegacy = mock.MagicMock(return_value=False)
+            proj.HasStash = mock.MagicMock(return_value=False)
+
+            with mock.patch.object(project, "git_require", return_value=True):
+                self.assertFalse(proj._HasDirtyOrStash())
+
+            proj._GetStatusSnapshot.assert_called_once_with(
+                untracked_files="normal", show_stash=True
+            )
+            proj._IsDirtyLegacy.assert_called_once_with(consider_untracked=True)
 
     def test_old_git_dirty_check_uses_legacy_plumbing(self) -> None:
         """Git clients before 2.11 retain the existing dirty-check path."""
@@ -2349,6 +2419,33 @@ class StatelessSyncTests(unittest.TestCase):
 
             self.assertTrue(res.success)
             self.assertFalse(getattr(proj, "stateless_prune_needed", False))
+
+    def test_sync_network_half_stateless_skips_without_worktree(self) -> None:
+        """Test stateless sync doesn't prune a project with no worktree."""
+        with utils_for_test.TempGitTree() as tempdir:
+            proj = self._get_project(tempdir)
+            proj.worktree = os.path.join(tempdir, "missing")
+            proj._HasDirtyOrStash = mock.MagicMock(return_value=False)
+
+            res = proj.Sync_NetworkHalf()
+
+            self.assertTrue(res.success)
+            self.assertFalse(proj.stateless_prune_needed)
+            proj._LsRemote.assert_not_called()
+            proj._HasDirtyOrStash.assert_not_called()
+
+    def test_ls_remote_runs_without_worktree(self) -> None:
+        """Test ls-remote only needs the gitdir's remote config."""
+        with utils_for_test.TempGitTree() as tempdir:
+            proj = _create_mock_project(tempdir)
+            proj.work_git.commit("--allow-empty", "-m", "initial")
+            proj.work_git.config("remote.origin.url", tempdir)
+            head = proj.work_git.rev_parse("HEAD")
+            proj.worktree = os.path.join(tempdir, "missing")
+            # _create_mock_project() stubs this out.
+            del proj._LsRemote
+
+            self.assertEqual(f"{head}\tHEAD\n", proj._LsRemote("HEAD"))
 
     def test_sync_network_half_stateless_skips_if_local_commits(self):
         """Test stateless sync skips if there are local-only commits."""

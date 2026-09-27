@@ -30,7 +30,6 @@ import pytest
 import command
 from error import GitError
 from error import RepoExitError
-import git_status
 import manifest_xml
 from project import SyncNetworkHalfResult
 from subcmds import sync
@@ -982,19 +981,20 @@ class CheckForBloatedProjects(unittest.TestCase):
         self.opt = mock.Mock()
         self.opt.quiet = True
         self.opt.jobs = 1
+        self.opt.network_only = False
+        self.tempdirobj = tempfile.TemporaryDirectory(prefix="repo_tests")
+        self.addCleanup(self.tempdirobj.cleanup)
         self.project = mock.MagicMock(clone_depth="1")
         self.project.name = "project"
         self.project.Exists = True
-        self.project.worktree = "worktree"
+        self.project.worktree = self.tempdirobj.name
         self.project.stateless_prune_needed = False
         self.cmd.git_event_log = mock.MagicMock()
         self.cmd._bloated_projects = []
 
-    def test_one_project_reuses_status_head_oid(self) -> None:
-        """The bloat scan gets dirty state and HEAD from one snapshot."""
-        status = git_status.StatusSnapshot()
-        status.branch_oid = "local"
-        self.project._GetStatusSnapshot.return_value = status
+    def test_one_project_uses_dirty_and_head(self) -> None:
+        """A project whose HEAD left the manifest revision is measured."""
+        self.project.GetDirtyAndHead.return_value = (False, "local")
         self.project.GetRevisionId.return_value = "manifest"
         self.project.bare_git.count_objects.return_value = (
             "packs: 0\nsize-pack: 0\nsize-garbage: 0\n"
@@ -1006,15 +1006,28 @@ class CheckForBloatedProjects(unittest.TestCase):
         ):
             self.assertIsNone(self.cmd._CheckOneBloatedProject(0))
 
-        self.project.IsDirty.assert_not_called()
-        self.project.work_git.rev_parse.assert_not_called()
+        self.project.GetDirtyAndHead.assert_called_once_with()
+        self.project.bare_git.count_objects.assert_called_once_with("-v")
+
+    def test_one_dirty_project_is_measured(self) -> None:
+        """A dirty project is measured even if HEAD matches the manifest."""
+        self.project.GetDirtyAndHead.return_value = (True, "local")
+        self.project.GetRevisionId.return_value = "local"
+        self.project.bare_git.count_objects.return_value = (
+            "packs: 0\nsize-pack: 0\nsize-garbage: 0\n"
+        )
+        with mock.patch.object(
+            sync.Sync,
+            "get_parallel_context",
+            return_value={"projects": [self.project]},
+        ):
+            self.assertIsNone(self.cmd._CheckOneBloatedProject(0))
+
         self.project.bare_git.count_objects.assert_called_once_with("-v")
 
     def test_one_unborn_project_skips_bloat_check(self) -> None:
-        """A porcelain initial branch behaves like failed rev-parse HEAD."""
-        status = git_status.StatusSnapshot()
-        status.index_changes["staged"] = git_status.StatusEntry("staged", "M")
-        self.project._GetStatusSnapshot.return_value = status
+        """A project without a resolvable HEAD is skipped."""
+        self.project.GetDirtyAndHead.return_value = (True, None)
 
         with mock.patch.object(
             sync.Sync,
@@ -1040,6 +1053,42 @@ class CheckForBloatedProjects(unittest.TestCase):
         self.project.clone_depth = None
         self.cmd._CheckForBloatedProjects([self.project], self.opt)
         self.assertFalse(self.cmd.git_event_log.ErrorEvent.called)
+
+    @mock.patch("subcmds.sync.git_require", return_value=True)
+    @mock.patch("subcmds.sync.Progress")
+    def test_network_only_skips_check(
+        self, mock_progress: mock.Mock, mock_git_require: mock.Mock
+    ) -> None:
+        """--network-only doesn't read any worktree state."""
+        self.opt.network_only = True
+        self.cmd.ExecuteInParallel = mock.Mock()
+
+        self.cmd._CheckForBloatedProjects([self.project], self.opt)
+
+        mock_progress.assert_not_called()
+        self.cmd.ExecuteInParallel.assert_not_called()
+
+    @mock.patch("subcmds.sync.git_require", return_value=True)
+    @mock.patch("subcmds.sync.Progress")
+    def test_projects_without_worktree_excluded(
+        self, mock_progress: mock.Mock, mock_git_require: mock.Mock
+    ) -> None:
+        """Projects without a checked-out worktree are never scanned."""
+        self.cmd.ExecuteInParallel = mock.Mock()
+        missing = os.path.join(self.tempdirobj.name, "missing")
+        for attr, value in (
+            ("worktree", missing),
+            ("worktree", None),
+            ("Exists", False),
+        ):
+            with self.subTest(attr=attr, value=value):
+                mock_progress.reset_mock()
+                self.cmd.ExecuteInParallel.reset_mock()
+                with mock.patch.object(self.project, attr, value):
+                    self.cmd._CheckForBloatedProjects([self.project], self.opt)
+
+                mock_progress.assert_not_called()
+                self.cmd.ExecuteInParallel.assert_not_called()
 
     @mock.patch("subcmds.sync.git_require")
     @mock.patch("subcmds.sync.Progress")

@@ -1582,26 +1582,12 @@ later is required to fix a server side protocol bug.
         """
         project = cls.get_parallel_context()["projects"][project_index]
 
-        if not project.Exists or not project.worktree:
-            return None
-
         # Only check dirty or locally modified projects. These can't be
         # freshly cloned and will accumulate garbage.
         try:
-            status = project._GetStatusSnapshot(
-                untracked_files="normal", branch=True
-            )
-            if status is not None:
-                is_dirty = status.is_dirty(consider_untracked=True)
-                head_rev = status.branch_oid
-            else:
-                is_dirty = project.IsDirty(consider_untracked=True)
-                head_rev = project.work_git.rev_parse(HEAD)
-
+            is_dirty, head_rev = project.GetDirtyAndHead()
             if head_rev is None:
-                # Porcelain v2 reports an unborn branch as "(initial)".  The
-                # legacy rev-parse path failed here and skipped the bloat
-                # calculation, so preserve that behavior.
+                # An unborn branch has no HEAD to compare, so skip it.
                 return None
 
             manifest_rev = project.GetRevisionId(project.bare_ref.all)
@@ -1643,16 +1629,27 @@ later is required to fix a server side protocol bug.
         run 'git count-objects -v' and warn if the repository is accumulating
         excessive pack files or garbage.
         """
+        # --network-only promises not to touch worktrees, but git status and
+        # update-index --refresh can both rewrite the index.
+        if opt.network_only:
+            return
+
         # We only care about bloated projects if we have a git version that
         # supports --no-auto-gc (2.23.0+) since what we use to disable auto-gc
         # in Project._RemoteFetch.
         if not git_require((2, 23, 0)):
             return
 
+        # Skip projects with no worktree on disk, e.g. ones only ever synced
+        # with --network-only.
         projects = [
             p
             for p in projects
-            if p.clone_depth and not p.stateless_prune_needed
+            if p.clone_depth
+            and not p.stateless_prune_needed
+            and p.worktree
+            and p.Exists
+            and platform_utils.isdir(p.worktree)
         ]
         if not projects:
             return
